@@ -4,12 +4,12 @@ using AgentsHub.Services;
 namespace AgentsHub.Helpers;
 
 /// <summary>
-/// A desktop AI or developer client/VPN found on this machine but not yet on the Dev Tools page.
+/// A desktop AI or developer client found on this machine but not yet on the Dev Tools page.
 /// </summary>
 public sealed record InstalledAiClient(string Name, string Target, string Source, bool IsIde = false);
 
 /// <summary>
-/// Finds installed AI desktop tools, developer editors, and network clients (e.g. Proton, Cloudflare WARP, WorkBuddy, Devin, FreeBuff).
+/// Finds installed AI desktop tools and developer editors (e.g. WorkBuddy, Devin, FreeBuff).
 /// Uses direct well-known candidate paths first, followed by a fast bounded BFS directory walk across user and system program folders.
 /// </summary>
 public static class InstalledClients
@@ -22,63 +22,6 @@ public static class InstalledClients
 
     private static readonly KnownClient[] Known =
     [
-        // VPNs & Network tools
-        new("Proton VPN",
-            ["ProtonVPN.Launcher.exe", "ProtonVPN.exe"],
-            [
-                @"C:\Program Files\Proton\VPN\ProtonVPN.Launcher.exe",
-                @"C:\Program Files\Proton\VPN\ProtonVPN.exe",
-                @"C:\Program Files (x86)\Proton\VPN\ProtonVPN.Launcher.exe",
-                @"C:\Program Files (x86)\Proton\VPN\ProtonVPN.exe",
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Proton\VPN\ProtonVPN.Launcher.exe")
-            ]),
-
-        new("Cloudflare WARP",
-            ["Cloudflare WARP.exe", "warp-cli.exe", "Cloudflare One.exe", "CloudflareWARP.exe"],
-            [
-                @"C:\Program Files\Cloudflare\Cloudflare WARP\Cloudflare WARP.exe",
-                @"C:\Program Files (x86)\Cloudflare\Cloudflare WARP\Cloudflare WARP.exe",
-                @"C:\Program Files\Cloudflare\Cloudflare One\Cloudflare One.exe",
-                @"C:\Program Files (x86)\Cloudflare\Cloudflare One\Cloudflare One.exe",
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Cloudflare WARP\Cloudflare WARP.exe")
-            ]),
-
-        new("Tailscale",
-            ["tailscale-ipn.exe", "Tailscale.exe"],
-            [
-                @"C:\Program Files\Tailscale\tailscale-ipn.exe",
-                @"C:\Program Files\Tailscale\Tailscale.exe",
-                @"C:\Program Files (x86)\Tailscale\tailscale-ipn.exe"
-            ]),
-
-        new("WireGuard",
-            ["wireguard.exe"],
-            [
-                @"C:\Program Files\WireGuard\wireguard.exe",
-                @"C:\Program Files (x86)\WireGuard\wireguard.exe"
-            ]),
-
-        new("Mullvad VPN",
-            ["Mullvad VPN.exe"],
-            [
-                @"C:\Program Files\Mullvad VPN\Mullvad VPN.exe",
-                @"C:\Program Files (x86)\Mullvad VPN\Mullvad VPN.exe"
-            ]),
-
-        new("ZeroTier One",
-            ["ZeroTier One.exe"],
-            [
-                @"C:\Program Files\ZeroTier\One\ZeroTier One.exe",
-                @"C:\Program Files (x86)\ZeroTier\One\ZeroTier One.exe"
-            ]),
-
-        new("OpenVPN GUI",
-            ["openvpn-gui.exe"],
-            [
-                @"C:\Program Files\OpenVPN\bin\openvpn-gui.exe",
-                @"C:\Program Files (x86)\OpenVPN\bin\openvpn-gui.exe"
-            ]),
-
         // AI Tools & Workspace Apps requested by user
         new("FreeBuff Desktop",
             ["Freebuff.exe", "freebuff.exe"],

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -45,6 +46,12 @@ public partial class LanProxyService : IDisposable
     public int TargetPort { get; set; } = 9119;
     public bool IsRunning { get; private set; }
 
+    /// <summary>
+    /// Pairing secret for the gateway. Loopback callers do not need it; every other device must
+    /// arrive through a link or QR code that carries it. Rotated on each start.
+    /// </summary>
+    public string AccessToken { get; private set; } = string.Empty;
+
     /// <summary>Set when the last Start() could not bind. Null once a start succeeds.</summary>
     public string? LastBindError { get; private set; }
 
@@ -52,11 +59,17 @@ public partial class LanProxyService : IDisposable
     public Func<Task<bool>>? CheckHubAliveAction { get; set; }
 
     /// <summary>
-    /// The ports offered for direct LAN exposure, before the user picks which ones run. The dashboard
-    /// is not in this list: it is reached through the gateway port, which proxies to it already, so
-    /// exposing the engine port a second time only duplicated the dashboard on an odd URL.
+    /// The ports that may be offered for direct LAN exposure. The dashboard is not in this list:
+    /// it is reached through the gateway port, which proxies to it already, so exposing the engine
+    /// port a second time only duplicated the dashboard on an odd URL.
     /// </summary>
-    public static int[] DefaultDirectPorts() => [9229, 9339];
+    public static int[] OfferedDirectPorts() => [9229, 9339];
+
+    /// <summary>
+    /// Nothing is forwarded until the user selects it. A direct forwarder is raw TCP and cannot
+    /// carry the gateway's access token, so it is never on by default.
+    /// </summary>
+    public static int[] DefaultDirectPorts() => [];
 
     public static string LabelForPort(int port) => port switch
     {
@@ -77,7 +90,7 @@ public partial class LanProxyService : IDisposable
         if (string.IsNullOrWhiteSpace(raw)) return DefaultDirectPorts();
         if (string.Equals(raw, "none", StringComparison.OrdinalIgnoreCase)) return [];
 
-        var offered = DefaultDirectPorts();
+        var offered = OfferedDirectPorts();
         return [.. raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(value => int.TryParse(value, out var port) ? port : 0)
             // A selection saved before the port list changed can name a port that is no longer
@@ -118,6 +131,7 @@ public partial class LanProxyService : IDisposable
 
             try
             {
+                AccessToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
                 _cts = new CancellationTokenSource();
                 _listener = new TcpListener(IPAddress.Any, listenPort);
                 _listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
@@ -131,7 +145,7 @@ public partial class LanProxyService : IDisposable
 
                 // Only the ports the user chose are bound; an empty selection exposes nothing but
                 // the gateway, which is what the gateway port alone is for.
-                var wantedPorts = (directPorts ?? DefaultDirectPorts())
+                var wantedPorts = (directPorts ?? [])
                     .Where(port => port is > 0 and <= 65535)
                     .Distinct()
                     .ToArray();
@@ -274,6 +288,7 @@ public partial class LanProxyService : IDisposable
             _cts = null;
 
             _clients.Clear();
+            AccessToken = string.Empty;
             NotifyClientsChanged();
 
             LogMessage?.Invoke("LAN Proxy stopped.");
@@ -517,6 +532,36 @@ public partial class LanProxyService : IDisposable
 
                 var initialText = Encoding.ASCII.GetString(buffer, 0, Math.Min(bytesRead, 1024));
                 var requestPath = ExtractRequestPath(initialText);
+
+                // A remote device needs the pairing token from the QR link. A loopback caller using
+                // any other Host name does too, which is what a DNS-rebinding page looks like.
+                bool needsToken = isRemote || !HostHeaderIsLocal(initialText);
+                if (needsToken)
+                {
+                    // Fail closed: no token means no remote caller gets through, even if startup
+                    // somehow left the token unset.
+                    if (string.IsNullOrEmpty(AccessToken))
+                    {
+                        await SendPairingRequiredAsync(clientStream, requestPath);
+                        return;
+                    }
+
+                    string? supplied = ExtractQueryValue(requestPath, "k")
+                        ?? ExtractCookieValue(initialText, "agentshub_lan");
+
+                    if (!TokenEquals(supplied, AccessToken))
+                    {
+                        await SendPairingRequiredAsync(clientStream, requestPath);
+                        return;
+                    }
+
+                    // Move the token out of the URL so it stops appearing in history and logs.
+                    if (ExtractQueryValue(requestPath, "k") != null)
+                    {
+                        await SendTokenCookieRedirectAsync(clientStream, requestPath);
+                        return;
+                    }
+                }
 
                 if (isRemote)
                 {
@@ -778,6 +823,146 @@ public partial class LanProxyService : IDisposable
                 Shadow: "0 10px 25px rgba(0,0,0,0.5)"
             );
         }
+    }
+
+    private static string? ExtractQueryValue(string requestPath, string key)
+    {
+        int question = requestPath.IndexOf('?');
+        if (question < 0) return null;
+
+        foreach (string part in requestPath[(question + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int equals = part.IndexOf('=');
+            if (equals <= 0) continue;
+
+            if (string.Equals(part[..equals], key, StringComparison.OrdinalIgnoreCase))
+            {
+                return Uri.UnescapeDataString(part[(equals + 1)..]);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// True when the request arrived for this machine's own name. A browser tricked into resolving
+    /// an attacker domain to 127.0.0.1 still sends that domain in Host, so it is not local here.
+    /// </summary>
+    private static bool HostHeaderIsLocal(string headers)
+    {
+        foreach (string line in headers.Split('\n'))
+        {
+            if (!line.TrimStart().StartsWith("Host:", StringComparison.OrdinalIgnoreCase)) continue;
+
+            string host = line[(line.IndexOf(':') + 1)..].Trim();
+            int colon = host.LastIndexOf(':');
+            if (colon > 0) host = host[..colon];
+            host = host.Trim('[', ']');
+
+            if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)) return true;
+            return IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
+        }
+
+        return false;
+    }
+
+    private static string? ExtractCookieValue(string headers, string name)
+    {
+        foreach (string line in headers.Split('\n'))
+        {
+            if (!line.TrimStart().StartsWith("Cookie:", StringComparison.OrdinalIgnoreCase)) continue;
+
+            foreach (string cookie in line[(line.IndexOf(':') + 1)..].Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string trimmed = cookie.Trim();
+                int equals = trimmed.IndexOf('=');
+                if (equals <= 0) continue;
+
+                if (string.Equals(trimmed[..equals], name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return trimmed[(equals + 1)..];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TokenEquals(string? supplied, string expected)
+    {
+        if (string.IsNullOrEmpty(supplied) || expected.Length == 0) return false;
+
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(supplied),
+            Encoding.UTF8.GetBytes(expected));
+    }
+
+    private static string RemoveQueryValue(string requestPath, string key)
+    {
+        int question = requestPath.IndexOf('?');
+        if (question < 0) return requestPath;
+
+        string path = requestPath[..question];
+        var kept = new List<string>();
+
+        foreach (string part in requestPath[(question + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int equals = part.IndexOf('=');
+            string partKey = equals > 0 ? part[..equals] : part;
+            if (string.Equals(partKey, key, StringComparison.OrdinalIgnoreCase)) continue;
+            kept.Add(part);
+        }
+
+        return kept.Count == 0 ? path : $"{path}?{string.Join('&', kept)}";
+    }
+
+    private async Task SendTokenCookieRedirectAsync(Stream stream, string requestPath)
+    {
+        string location = RemoveQueryValue(requestPath, "k");
+        string header = $"HTTP/1.1 302 Found\r\nLocation: {location}\r\nSet-Cookie: agentshub_lan={AccessToken}; HttpOnly; SameSite=Lax; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+
+        await stream.WriteAsync(headerBytes.AsMemory());
+        await stream.FlushAsync();
+    }
+
+    private static async Task SendPairingRequiredAsync(Stream stream, string requestPath)
+    {
+        var t = GetLanThemeTokens(requestPath);
+        string html = $$"""
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Agents Hub - Pairing Required</title>
+              <style>
+                :root { --bg-app: {{t.BgApp}}; --bg-card: {{t.BgCard}}; --border-subtle: {{t.BorderSubtle}}; --text-main: {{t.TextMain}}; --text-muted: {{t.TextMuted}}; --accent: {{t.Accent}}; --accent-text: {{t.AccentText}}; }
+                * { box-sizing: border-box; }
+                body { background: var(--bg-app); color: var(--text-main); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 16px; }
+                .card { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 36px 28px; max-width: 460px; width: 100%; text-align: center; }
+                h1 { font-size: 1.4rem; font-weight: 700; margin: 0 0 10px 0; }
+                p { color: var(--text-muted); font-size: 0.95rem; line-height: 1.5; margin: 0; }
+                .hint { margin-top: 18px; padding: 12px; border: 1px dashed var(--border-subtle); border-radius: 8px; color: var(--accent); font-size: 0.85rem; }
+              </style>
+            </head>
+            <body>
+              <div class="card">
+                <h1>Pair this device first</h1>
+                <p>This gateway only answers a device that arrived from the LAN link or QR code shown in Agents Hub.</p>
+                <div class="hint">Open Settings, then LAN Remote Proxy, and scan the code again.</div>
+              </div>
+            </body>
+            </html>
+            """;
+
+        byte[] bodyBytes = Encoding.UTF8.GetBytes(html);
+        string header = $"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {bodyBytes.Length}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+        byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+
+        await stream.WriteAsync(headerBytes.AsMemory());
+        await stream.WriteAsync(bodyBytes.AsMemory());
+        await stream.FlushAsync();
     }
 
     private static async Task SendOfflinePageAsync(Stream stream, string? requestPath = null)
@@ -1074,7 +1259,7 @@ public partial class LanProxyService : IDisposable
         string accent = ThemeManager.AccentHex;
         var json = $"{{\"online\": {(isAlive ? "true" : "false")}, \"theme\": \"{theme}\", \"accent\": \"{accent}\"}}";
         var bodyBytes = Encoding.UTF8.GetBytes(json);
-        var header = $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bodyBytes.Length}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+        var header = $"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {bodyBytes.Length}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         var headerBytes = Encoding.ASCII.GetBytes(header);
 
         await stream.WriteAsync(headerBytes.AsMemory());

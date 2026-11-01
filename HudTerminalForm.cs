@@ -501,9 +501,9 @@ public sealed class HudTerminalForm : Form
             var env = await CoreWebView2Environment.CreateAsync(null, userDataDir);
             await _webView.EnsureCoreWebView2Async(env);
 
-            _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
-            _webView.CoreWebView2.Settings.AreDevToolsEnabled = true;
-
+            // The HUD only ever renders the shipped terminal page, and that page posts keystrokes
+            // to the host. Nothing else may load here.
+            Helpers.WebViewSecurity.Apply(_webView.CoreWebView2, allowLoopback: false);
             _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
 
             string terminalHtml = Path.Combine(AppContext.BaseDirectory, "ui", "terminal.html");

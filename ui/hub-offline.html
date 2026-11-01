@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hub Engine Offline</title>
+  <style>
+    :root {
+      --bg-app: #09090b;
+      --bg-card: #18181b;
+      --border-subtle: #27272a;
+      --text-main: #fafafa;
+      --text-muted: #a1a1aa;
+      --text-dim: #71717a;
+      --accent-green: #4049B9;
+      --accent-text: #ffffff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg-app);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s ease, color 0.2s ease;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 36px 44px;
+      max-width: 480px;
+      text-align: center;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      background: rgba(239, 68, 68, 0.15);
+      color: #ef4444;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 8px;
+    }
+    p {
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+    .btn {
+      background: var(--accent-green);
+      color: var(--accent-text);
+      border: none;
+      border-radius: 8px;
+      padding: 12px 28px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+    }
+    .btn:hover {
+      filter: brightness(1.1);
+      transform: translateY(-1px);
+    }
+    .port-info {
+      margin-top: 20px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">Engine Offline</div>
+    <h1>Hub Engine</h1>
+    <p>The hub engine is not running. Start it to load the dashboard and the CLI sessions behind it.</p>
+    <button class="btn" onclick="startHub()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      Start Hub Engine
+    </button>
+    <div class="port-info" id="port-label">Target Port: 9119</div>
+  </div>
+
+  <script>
+    function hexToHsl(hex) {
+      hex = (hex || '').replace(/^#/, '').trim();
+      if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+      if (hex.length !== 6) return { h: 236, s: 49, l: 49 };
+      const r = parseInt(hex.substring(0, 2), 16) / 255;
+      const g = parseInt(hex.substring(2, 4), 16) / 255;
+      const b = parseInt(hex.substring(4, 6), 16) / 255;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      let h = 0, s = 0, l = (max + min) / 2;
+      if (max !== min) {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+          case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+          case g: h = (b - r) / d + 2; break;
+          case b: h = (r - g) / d + 4; break;
+        }
+        h = Math.round(h * 60);
+      }
+      return { h, s: Math.round(s * 100), l: Math.round(l * 100) };
+    }
+
+    function applyAdaptiveTheme(theme, accent) {
+      const isLight = theme === 'light';
+      const hex = accent || '#4049B9';
+      const { h, s, l } = hexToHsl(hex);
+      const root = document.documentElement.style;
+
+      if (isLight) {
+        root.setProperty('--bg-app', `hsl(${h}, 22%, 95.5%)`);
+        root.setProperty('--bg-card', '#ffffff');
+        root.setProperty('--border-subtle', `hsl(${h}, 25%, 83%)`);
+        root.setProperty('--text-main', `hsl(${h}, 28%, 11%)`);
+        root.setProperty('--text-muted', `hsl(${h}, 16%, 36%)`);
+        root.setProperty('--text-dim', `hsl(${h}, 10%, 52%)`);
+        root.setProperty('--accent-green', hex);
+        root.setProperty('--accent-text', l > 55 ? '#0a0f14' : '#ffffff');
+      } else {
+        root.setProperty('--bg-app', `hsl(${h}, 22%, 5.5%)`);
+        root.setProperty('--bg-card', `hsl(${h}, 26%, 12.5%)`);
+        root.setProperty('--border-subtle', `hsl(${h}, 24%, 19%)`);
+        root.setProperty('--text-main', '#f8fafc');
+        root.setProperty('--text-muted', `hsl(${h}, 12%, 68%)`);
+        root.setProperty('--text-dim', `hsl(${h}, 10%, 48%)`);
+        root.setProperty('--accent-green', hex);
+        root.setProperty('--accent-text', '#ffffff');
+      }
+    }
+
+    // Read theme from URL params, server-injected globals, or localStorage
+    const urlParams = new URLSearchParams(window.location.search);
+    const queryTheme = urlParams.get('theme');
+    const queryAccent = urlParams.get('accent');
+    if (queryTheme) localStorage.setItem('agents_hub_theme', queryTheme);
+    if (queryAccent) localStorage.setItem('agents_hub_accent_color', queryAccent);
+
+    const activeTheme = queryTheme || (window.__INITIAL_THEME__ || localStorage.getItem('agents_hub_theme') || 'light');
+    const activeAccent = queryAccent || (window.__INITIAL_ACCENT__ || localStorage.getItem('agents_hub_accent_color') || '#4049B9');
+    applyAdaptiveTheme(activeTheme, activeAccent);
+
+    function startHub() {
+      if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage({ type: 'start_hub' });
+      }
+      document.querySelector('.badge').textContent = 'Starting...';
+      document.querySelector('.badge').style.color = '#f59e0b';
+      document.querySelector('.badge').style.borderColor = '#f59e0b';
+    }
+
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.addEventListener('message', e => {
+        if (!e.data) return;
+        if (e.data.type === 'theme_changed') {
+          if (e.data.theme) localStorage.setItem('agents_hub_theme', e.data.theme);
+          if (e.data.accentColor) localStorage.setItem('agents_hub_accent_color', e.data.accentColor);
+          applyAdaptiveTheme(e.data.theme, e.data.accentColor);
+        }
+        if (e.data.port) {
+          document.getElementById('port-label').textContent = 'Target Port: ' + e.data.port;
+        }
+      });
+    }
+  </script>
+</body>
+</html>

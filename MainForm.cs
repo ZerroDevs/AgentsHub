@@ -171,28 +171,34 @@ public partial class MainForm : Form
                 Directory.CreateDirectory(webAssetsPath);
             }
 
-            // Map https://app.agentshub.local to modern React/Vite SPA dist or ui folder
+            // Map https://app.agentshub.local to modern React/Vite SPA dist or ui folder. Deny keeps
+            // every other origin out of the local assets; the app itself is same-origin and unaffected.
             _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 "app.agentshub.local",
                 webAssetsPath,
-                CoreWebView2HostResourceAccessKind.Allow
+                CoreWebView2HostResourceAccessKind.Deny
             );
 
             // Wallpapers live outside the build output, so a new build cannot wipe the user's image.
             var themeImagePath = DashboardWebBridge.ThemeImageFolder;
             Directory.CreateDirectory(themeImagePath);
+            // Wallpapers are loaded by the app origin from the theme origin, so this mapping stays
+            // cross-origin readable. It exposes images only; navigation is guarded below.
             _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 "theme.agentshub.local",
                 themeImagePath,
                 CoreWebView2HostResourceAccessKind.Allow
             );
 
-            // DevTools stay unavailable in every WebView2 the app hosts - this is a product
-            // surface, not a browser. AreDevToolsEnabled = false removes the DevTools window
-            // itself, the context-menu "Inspect" entry, and the F12 / Ctrl+Shift+I shortcuts.
+            // This WebView can call every host action, so it stays on the two mapped origins and
+            // DevTools stay off. A link clicked in a chat message opens in the system browser
+            // instead of replacing the privileged page.
+            Helpers.WebViewSecurity.Apply(
+                _webView.CoreWebView2,
+                allowLoopback: false,
+                "https://app.agentshub.local",
+                "https://theme.agentshub.local");
             _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
-            _webView.CoreWebView2.Settings.AreDevToolsEnabled = true;
-            _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
 
             // Attach C# backend bridge
@@ -558,7 +564,10 @@ public partial class MainForm : Form
         {
             string lanIp = NetworkHelper.GetLocalIPv4();
             int lanPort = _lanProxyService?.ListenPort ?? StartupHelper.GetIntPreference("LanPort", 9191);
-            string url = $"http://{lanIp}:{lanPort}/";
+            string token = _lanProxyService is { IsRunning: true } lan && !string.IsNullOrEmpty(lan.AccessToken)
+                ? $"?k={lan.AccessToken}"
+                : string.Empty;
+            string url = $"http://{lanIp}:{lanPort}/{token}";
             Clipboard.SetText(url);
             ShowTrayBalloon("LAN Link Copied", url);
         }

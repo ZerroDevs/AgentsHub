@@ -44,8 +44,10 @@ class WebViewBridge {
         this.handleIncomingRaw(event.data);
       });
     } else {
-      // In standalone browser dev mode, listen to window postMessage or mock
+      // Browser dev host only. Same-origin check matters here: without it any framing page can
+      // post a fake response or event into the UI.
       window.addEventListener('message', (event: MessageEvent) => {
+        if (event.origin !== window.location.origin) return;
         if (event.data && typeof event.data === 'object' && (event.data.event || event.data.responseId)) {
           this.handleIncomingRaw(event.data);
         }
@@ -139,11 +141,16 @@ class WebViewBridge {
           this.pendingRequests.delete(requestId);
           reject(err);
         }
-      } else {
-        // Fallback for standalone dev mode
+      } else if (import.meta.env.DEV) {
+        // Layout work in a plain browser can still render, but this path never reaches a release
+        // build: a LAN viewer must not be shown invented ports, PIDs or file lists.
         setTimeout(() => {
           this.mockDevResponse(action, payload, requestId);
         }, 50);
+      } else {
+        clearTimeout(timer);
+        this.pendingRequests.delete(requestId);
+        reject(new Error('This action needs the Agents Hub desktop app.'));
       }
     });
   }

@@ -294,6 +294,19 @@ function linkifyText(text: string, keyBase: number): React.ReactNode[] {
   return nodes;
 }
 
+/**
+ * Only schemes that are safe to hand to the browser survive. Model output is untrusted text, so
+ * javascript:, data: and file: never become an href in the privileged app origin.
+ */
+function safeHref(raw: string): string | null {
+  const value = raw.trim().replace(/^<|>$/g, '');
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^mailto:/i.test(value)) return value;
+  if (value.startsWith('#')) return value;
+  return null;
+}
+
 function renderInlineTokens(line: string): React.ReactNode[] {
   const tokens: React.ReactNode[] = [];
   const regex = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
@@ -323,11 +336,12 @@ function renderInlineTokens(line: string): React.ReactNode[] {
       );
     } else if (token.startsWith('[') && token.includes('](')) {
       const linkMatch = token.match(/\[([^\]]+)\]\(([^)]+)\)/);
-      if (linkMatch) {
+      const href = linkMatch ? safeHref(linkMatch[2]) : null;
+      if (linkMatch && href) {
         tokens.push(
           <a
             key={match.index}
-            href={linkMatch[2]}
+            href={href}
             target="_blank"
             rel="noopener noreferrer"
             className="font-medium text-accent underline decoration-accent/40 hover:decoration-accent"
@@ -335,6 +349,10 @@ function renderInlineTokens(line: string): React.ReactNode[] {
             {linkMatch[1]}
           </a>
         );
+      } else if (linkMatch) {
+        // A model can emit javascript:, data: or file: here. Rendering it would run code in the
+        // privileged app origin, so keep the label and drop the link.
+        tokens.push(<span key={match.index}>{linkMatch[1]}</span>);
       } else {
         tokens.push(token);
       }

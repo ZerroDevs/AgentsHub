@@ -59,7 +59,7 @@ Name: "startupicon"; Description: "Launch Agents Hub minimized to system tray on
 
 [Files]
 ; الملف التنفيذي وكافة مخرجات الـ publish (DLLs وأي ملفات runtime مصاحبة)
-Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "Profiles\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ملفات الواجهة الأمامية لمجلد UI بالكامل (HTML / CSS / JS / xterm)
 Source: "ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -85,8 +85,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 
 ; Deliberately no [UninstallDelete] wipe of {app}.
 ;
-; That folder also holds {app}\Profiles, which stores the per-profile Antigravity credentials
-; including live Google OAuth tokens. A blanket "filesandordirs {app}" deleted them, so
-; uninstalling destroyed logins the user cannot recover. Inno already removes every file it
-; installed; the only thing left behind afterwards is user data, which is meant to survive.
-; Delete {app}\Profiles by hand if a genuinely clean removal is wanted.
+; Per-profile credentials now live under %LOCALAPPDATA%\AgentsHub, outside the install folder,
+; so an uninstall cannot reach them. The install folder is still not wiped because a custom
+; theme or a user-added script there may be the only copy. Inno already removes every file it
+; installed; anything left behind is user data, which is meant to survive an uninstall.

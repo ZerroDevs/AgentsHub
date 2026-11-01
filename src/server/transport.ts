@@ -18,6 +18,16 @@ export interface ClientData {
   connectedAt: number;
 }
 
+/** Constant-time comparison so a local client cannot learn the token by timing responses. */
+function safeEqual(candidate: string, expected: string): boolean {
+  if (candidate.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) {
+    diff |= candidate.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 export class SidecarTransport {
   private server: Server<ClientData> | null = null;
   private authenticatedSockets = new Set<ServerWebSocket<ClientData>>();
@@ -55,10 +65,13 @@ export class SidecarTransport {
           const authHeader = req.headers.get('Authorization');
           const headerToken = authHeader?.replace(/^Bearer\s+/i, '');
 
-          const tokenMatch = (queryToken && queryToken === authToken) ||
-                             (headerToken && headerToken === authToken);
+          // Fail closed: a sidecar started without a token is not reachable by anyone, instead of
+          // being reachable by everyone.
+          const tokenMatch = authToken.length > 0 &&
+                             ((typeof queryToken === 'string' && safeEqual(queryToken, authToken)) ||
+                              (typeof headerToken === 'string' && safeEqual(headerToken, authToken)));
 
-          if (!tokenMatch && authToken.length > 0) {
+          if (!tokenMatch) {
             return new Response('Unauthorized: Invalid sidecar security token', { status: 401 });
           }
 

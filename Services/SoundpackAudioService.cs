@@ -146,7 +146,6 @@ public sealed class SoundpackAudioService
                 "approval_needed" => "Action requires approval.",
                 "task_failed" => "Agent task failed.",
                 "checkpoint_created" => "Checkpoint saved.",
-                "vpn_rotated" => "VPN rotated.",
                 _ => "Notice."
             };
 

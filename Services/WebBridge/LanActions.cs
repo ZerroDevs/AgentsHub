@@ -291,7 +291,7 @@ public sealed partial class DashboardWebBridge : IDisposable
             requiredPorts,
             selectedPorts = LanProxyService.ReadSelectedDirectPorts(),
             availableForwarders = LanProxyService
-                .DefaultDirectPorts()
+                .OfferedDirectPorts()
                 .Select(port => new
                 {
                     port,
@@ -353,6 +353,15 @@ public sealed partial class DashboardWebBridge : IDisposable
         })];
     }
 
+    /// <summary>
+    /// Remote devices need the gateway's pairing token; a loopback browser does not. The gateway
+    /// exchanges it for a cookie on first use, so it appears in the URL only once.
+    /// </summary>
+    private string GatewayTokenParam =>
+        _lanProxyService is { IsRunning: true } proxy && !string.IsNullOrEmpty(proxy.AccessToken)
+            ? $"&k={proxy.AccessToken}"
+            : string.Empty;
+
     private List<object> GetRunningWebPorts(string lanIp, int hubPort, int lanProxyPort)
     {
         string themeParam = $"?theme={(ThemeManager.CurrentTheme == AppTheme.Light ? "light" : "dark")}&accent={Uri.EscapeDataString(ThemeManager.AccentHex)}";
@@ -365,7 +374,7 @@ public sealed partial class DashboardWebBridge : IDisposable
                 port = hubPort,
                 lanPort = lanProxyPort,
                 localUrl = $"http://127.0.0.1:{hubPort}/{themeParam}",
-                lanUrl = $"http://{lanIp}:{lanProxyPort}/{themeParam}",
+                lanUrl = $"http://{lanIp}:{lanProxyPort}/{themeParam}{GatewayTokenParam}",
                 state = _cliManager.GetInfo(CliType.Hub).State.ToString(),
                 isRunning = _cliManager.GetInfo(CliType.Hub).State == CliState.Running
             },
@@ -427,7 +436,7 @@ public sealed partial class DashboardWebBridge : IDisposable
             port = lanProxyPort,
             lanPort = lanProxyPort,
             localUrl = $"http://127.0.0.1:{lanProxyPort}/{themeParam}",
-            lanUrl = $"http://{lanIp}:{lanProxyPort}/{themeParam}",
+            lanUrl = $"http://{lanIp}:{lanProxyPort}/{themeParam}{GatewayTokenParam}",
             state = (_lanProxyService?.IsRunning ?? false) ? "Running" : "Offline",
             isRunning = _lanProxyService?.IsRunning ?? false
         });

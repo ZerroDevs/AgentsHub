@@ -146,7 +146,8 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
         var resp = context.Response;
 
         // Add standard CORS headers
-        resp.Headers.Set("Access-Control-Allow-Origin", "*");
+        resp.Headers.Set("Cache-Control", "no-store");
+        resp.Headers.Set("X-Content-Type-Options", "nosniff");
         resp.Headers.Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
         resp.Headers.Set("Access-Control-Allow-Headers", "*");
 
@@ -221,14 +222,6 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(headerApiKey) && !keysPool.Contains(headerApiKey, StringComparer.OrdinalIgnoreCase))
-            {
-                if (keysPool.Count == 0)
-                {
-                    keysPool.Add(headerApiKey);
-                }
-            }
-
             if (keysPool.Count == 0)
             {
                 var fallbackKey = AiConfigService.Instance.GetOpenRouterApiKey();
@@ -238,9 +231,21 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                 }
             }
 
+            // No caller key means no upstream call. With no configured pool, a caller may bring
+            // its own key and spend that key; it is never served by the stored pool by accident.
+            if (string.IsNullOrWhiteSpace(headerApiKey))
+            {
+                await SendAnthropicErrorAsync(resp, HttpStatusCode.Unauthorized, "Unauthorized: the local proxy requires an API key.", ct).ConfigureAwait(false);
+                return;
+            }
+
             if (keysPool.Count == 0)
             {
-                await SendAnthropicErrorAsync(resp, HttpStatusCode.Unauthorized, "No OpenRouter API key provided. Please configure your API key(s) in AgentsHub.", ct).ConfigureAwait(false);
+                keysPool.Add(headerApiKey);
+            }
+            else if (!keysPool.Contains(headerApiKey, StringComparer.Ordinal))
+            {
+                await SendAnthropicErrorAsync(resp, HttpStatusCode.Unauthorized, "Unauthorized: the local proxy requires the configured API key.", ct).ConfigureAwait(false);
                 return;
             }
 

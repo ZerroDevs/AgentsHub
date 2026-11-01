@@ -595,6 +595,9 @@ public class CliManagerService : IDisposable
                 {
                     var activeProvider = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
                     string selectedClaudeModel = AiConfigService.Instance.GetClaudeSelectedModel();
+                    // The proxy now rejects callers that do not present a configured key, so the
+                    // child gets the same resolved key the pool would accept.
+                    string providerKey = activeProvider.GetEffectiveApiKeys().FirstOrDefault() ?? activeProvider.ApiKey;
 
                     // If active provider is local proxy (or port 9230), ensure local proxy is running
                     if (string.Equals(activeProvider.Id, "preset_local_proxy", StringComparison.OrdinalIgnoreCase) ||
@@ -607,13 +610,13 @@ public class CliManagerService : IDisposable
                     EnsureClaudeOpenRouterTokenPrecedence();
 
                     // Synchronize %USERPROFILE%\.claude\settings.json with provider env and strip ANTHROPIC_API_KEY
-                    SyncClaudeGatewaySettingsJson(activeProvider.ApiKey, selectedClaudeModel, activeProvider.BaseUrl);
+                    SyncClaudeGatewaySettingsJson(providerKey, selectedClaudeModel, activeProvider.BaseUrl);
 
                     // Strictly inject ONLY ANTHROPIC_AUTH_TOKEN and explicitly remove ANTHROPIC_API_KEY
                     envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
                         ["ANTHROPIC_BASE_URL"] = string.IsNullOrWhiteSpace(activeProvider.BaseUrl) ? "http://127.0.0.1:9230" : activeProvider.BaseUrl,
-                        ["ANTHROPIC_AUTH_TOKEN"] = activeProvider.ApiKey,
+                        ["ANTHROPIC_AUTH_TOKEN"] = providerKey,
                         ["ANTHROPIC_API_KEY"] = "", // Empty signals ConPtySession to remove from child environment
                         ["ANTHROPIC_MODEL"] = selectedClaudeModel,
                         ["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "deepseek/deepseek-r1:free"
@@ -755,6 +758,7 @@ public class CliManagerService : IDisposable
             if (AiConfigService.Instance.GetClaudeInjectionEnabled())
             {
                 var activeProvider = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
+                string providerKey = activeProvider.GetEffectiveApiKeys().FirstOrDefault() ?? activeProvider.ApiKey;
 
                 // The local translation proxy must be listening before claude talks to it.
                 if (string.Equals(activeProvider.Id, "preset_local_proxy", StringComparison.OrdinalIgnoreCase) ||
@@ -766,7 +770,7 @@ public class CliManagerService : IDisposable
                 claudeEnv["ANTHROPIC_BASE_URL"] = string.IsNullOrWhiteSpace(activeProvider.BaseUrl)
                     ? "http://127.0.0.1:9230"
                     : activeProvider.BaseUrl;
-                claudeEnv["ANTHROPIC_AUTH_TOKEN"] = activeProvider.ApiKey;
+                claudeEnv["ANTHROPIC_AUTH_TOKEN"] = providerKey;
                 claudeEnv["ANTHROPIC_MODEL"] = AiConfigService.Instance.GetClaudeSelectedModel();
                 claudeEnv["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "deepseek/deepseek-r1:free";
             }

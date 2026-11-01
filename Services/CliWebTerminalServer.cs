@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -41,14 +42,30 @@ public sealed partial class CliWebTerminalServer : IDisposable
     /// One HTTP + WebSocket endpoint serving a single terminal session. Keyed by session id
     /// rather than CliType, so every Antigravity profile can have its own live port.
     /// </summary>
-    private sealed class EndpointListener(string sessionId, string displayName, int port)
+    private sealed class EndpointListener(string sessionId, string displayName, int port, string token)
     {
         public string SessionId { get; } = sessionId;
         public string DisplayName { get; } = displayName;
         public int Port { get; } = port;
+        /// <summary>Handed to the served page only, so a page without it cannot drive the terminal.</summary>
+        public string Token { get; } = token;
         public HttpListener? Listener { get; set; }
         public ConcurrentDictionary<WebSocket, WebSocketClient> Sockets { get; } = new();
     }
+
+    /// <summary>
+    /// The terminal page needs xterm and its own stylesheet, nothing else from the app folder. A
+    /// fixed list also removes the path join that turned a request path into a filesystem path.
+    /// </summary>
+    private static readonly HashSet<string> AllowedAssets = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "terminal.html",
+        "js/xterm.js",
+        "js/xterm-addon-fit.js",
+        "css/xterm.css",
+        "cli.png",
+        "app.png"
+    };
 
     private readonly CliManagerService _cliManager;
     private readonly string _webAssetsDir;
@@ -66,8 +83,10 @@ public sealed partial class CliWebTerminalServer : IDisposable
 
         // Fixed endpoints. Antigravity profiles register their own on launch through
         // EnsureEndpoint, because each profile binds its own allocated port.
-        _endpoints["claude_code"] = new EndpointListener("claude_code", "Claude Code", 9229);
-        _endpoints["antigravity_cli"] = new EndpointListener("antigravity_cli", "Antigravity CLI", 9339);
+        _endpoints["claude_code"] = new EndpointListener(
+            "claude_code", "Claude Code", 9229, Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
+        _endpoints["antigravity_cli"] = new EndpointListener(
+            "antigravity_cli", "Antigravity CLI", 9339, Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
 
         // Subscribe to the id-based events: the CliType events collapse every Antigravity
         // profile onto CliType.AntigravityCli, which would feed one profile's output to another
@@ -102,7 +121,11 @@ public sealed partial class CliWebTerminalServer : IDisposable
             StopEndpoint(existing);
         }
 
-        var endpoint = new EndpointListener(sessionId, displayName, port);
+        var endpoint = new EndpointListener(
+            sessionId,
+            displayName,
+            port,
+            Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
         if (_endpoints.TryAdd(sessionId, endpoint))
         {
             StartEndpoint(endpoint);
@@ -171,42 +194,40 @@ public sealed partial class CliWebTerminalServer : IDisposable
     {
         try
         {
+            // This listener only ever serves the machine it runs on. A raw LAN forwarder cannot
+            // authenticate a terminal, so a remote socket is refused instead of exposed.
+            var remote = context.Request.RemoteEndPoint?.Address;
+            if (remote != null && !IPAddress.IsLoopback(remote))
+            {
+                context.Response.StatusCode = 403;
+                context.Response.Close();
+                return;
+            }
+
+            string path = context.Request.Url?.AbsolutePath ?? "/";
+
             if (context.Request.IsWebSocketRequest)
             {
-                string reqPath = context.Request.Url?.AbsolutePath ?? "/";
-                if (reqPath == "/ws")
+                if (path == "/ws" && IsAllowedOrigin(context) && HasValidToken(context, endpoint))
                 {
                     await HandleWebSocketAsync(endpoint, context, ct).ConfigureAwait(false);
                     return;
                 }
-            }
 
-            string path = context.Request.Url?.AbsolutePath ?? "/";
-            if (path == "/" || path == "/index.html")
-            {
-                await ServeFileAsync(context, "terminal.html", "text/html; charset=utf-8").ConfigureAwait(false);
+                context.Response.StatusCode = 403;
+                context.Response.Close();
                 return;
             }
 
-            string relative = path.TrimStart('/');
-            string localFile = Path.Combine(_webAssetsDir, relative);
-            if (File.Exists(localFile))
+            string relative = path is "/" or "/index.html"
+                ? "terminal.html"
+                : path.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+
+            // The allowlist is written with forward slashes; the filesystem path is not.
+            string assetKey = relative.Replace(Path.DirectorySeparatorChar, '/');
+            if (AllowedAssets.Contains(assetKey))
             {
-                string ext = Path.GetExtension(localFile).ToLowerInvariant();
-                string contentType = ext switch
-                {
-                    ".html" => "text/html; charset=utf-8",
-                    ".js" => "application/javascript; charset=utf-8",
-                    ".css" => "text/css; charset=utf-8",
-                    ".png" => "image/png",
-                    ".svg" => "image/svg+xml",
-                    ".ico" => "image/x-icon",
-                    ".json" => "application/json; charset=utf-8",
-                    ".map" => "application/json; charset=utf-8",
-                    ".woff2" => "font/woff2",
-                    _ => "application/octet-stream"
-                };
-                await ServeFileAsync(context, relative, contentType).ConfigureAwait(false);
+                await ServeFileAsync(context, relative, ContentTypeFor(relative), endpoint.Token).ConfigureAwait(false);
                 return;
             }
 
@@ -219,10 +240,42 @@ public sealed partial class CliWebTerminalServer : IDisposable
         }
     }
 
-    private async Task ServeFileAsync(HttpListenerContext context, string relativeFile, string contentType)
+    private static bool HasValidToken(HttpListenerContext context, EndpointListener endpoint)
     {
-        string fullPath = Path.Combine(_webAssetsDir, relativeFile);
-        if (!File.Exists(fullPath))
+        string? token = context.Request.QueryString["token"];
+        if (string.IsNullOrEmpty(token)) return false;
+
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(token),
+            Encoding.UTF8.GetBytes(endpoint.Token));
+    }
+
+    /// <summary>
+    /// A page on another site can open a WebSocket to loopback; the browser sends its own Origin
+    /// and cannot forge it, so anything that is not this machine's own page is refused.
+    /// </summary>
+    private static bool IsAllowedOrigin(HttpListenerContext context)
+    {
+        string? origin = context.Request.Headers["Origin"];
+        if (string.IsNullOrEmpty(origin)) return true;
+
+        return Uri.TryCreate(origin, UriKind.Absolute, out var uri) && uri.IsLoopback;
+    }
+
+    private static string ContentTypeFor(string relativeFile) => Path.GetExtension(relativeFile).ToLowerInvariant() switch
+    {
+        ".html" => "text/html; charset=utf-8",
+        ".js" => "application/javascript; charset=utf-8",
+        ".css" => "text/css; charset=utf-8",
+        ".png" => "image/png",
+        _ => "application/octet-stream"
+    };
+
+    private async Task ServeFileAsync(HttpListenerContext context, string relativeFile, string contentType, string token)
+    {
+        string fullPath = Path.GetFullPath(Path.Combine(_webAssetsDir, relativeFile));
+        string assetsRoot = Path.GetFullPath(_webAssetsDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!fullPath.StartsWith(assetsRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(fullPath))
         {
             context.Response.StatusCode = 404;
             context.Response.Close();
@@ -235,8 +288,15 @@ public sealed partial class CliWebTerminalServer : IDisposable
         {
             string html = await File.ReadAllTextAsync(fullPath).ConfigureAwait(false);
 
+            // Both values land inside the page's CSS and script, so they are checked as a value,
+            // never interpolated as text.
             string reqTheme = context.Request.QueryString["theme"] ?? (ThemeManager.CurrentTheme == AppTheme.Light ? "light" : "dark");
+            reqTheme = string.Equals(reqTheme, "light", StringComparison.OrdinalIgnoreCase) ? "light" : "dark";
+
             string reqAccent = context.Request.QueryString["accent"] ?? ThemeManager.AccentHex;
+            if (!AccentRegex().IsMatch(reqAccent)) reqAccent = ThemeManager.AccentHex;
+            if (!AccentRegex().IsMatch(reqAccent)) reqAccent = "#4049B9";
+
             bool isLight = reqTheme.Equals("light", StringComparison.OrdinalIgnoreCase);
             var (h, _, _) = ThemeManager.HexToHsl(reqAccent);
             double lum = ThemeManager.GetLuminance(reqAccent);
@@ -258,7 +318,7 @@ public sealed partial class CliWebTerminalServer : IDisposable
                 html = rootRegex.Replace(html, dynamicRoot, 1);
             }
 
-            string scriptInject = $"<script>window.__INITIAL_THEME__='{reqTheme}';window.__INITIAL_ACCENT__='{reqAccent}';</script>\n</head>";
+            string scriptInject = $"<script>window.__INITIAL_THEME__='{reqTheme}';window.__INITIAL_ACCENT__='{reqAccent}';window.__TERMINAL_TOKEN__='{token}';</script>\n</head>";
             html = html.Replace("</head>", scriptInject, StringComparison.OrdinalIgnoreCase);
 
             bytes = Encoding.UTF8.GetBytes(html);
@@ -270,7 +330,8 @@ public sealed partial class CliWebTerminalServer : IDisposable
 
         context.Response.ContentType = contentType;
         context.Response.ContentLength64 = bytes.Length;
-        context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
+        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Add("Referrer-Policy", "no-referrer");
         context.Response.Headers.Add("Cache-Control", "no-cache, no-store, must-revalidate");
         context.Response.StatusCode = 200;
         await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
@@ -470,4 +531,7 @@ public sealed partial class CliWebTerminalServer : IDisposable
 
     [GeneratedRegex(@":root\s*\{[^}]*\}", RegexOptions.Singleline)]
     private static partial Regex MyRegex();
+
+    [GeneratedRegex("^#[0-9a-fA-F]{6}$")]
+    private static partial Regex AccentRegex();
 }
