@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom';
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { AlertTriangle, ArrowUp, Brain, Clock, FileCode, Folder, Paperclip, Pencil, Quote, Sparkles, Square, SquareTerminal, Terminal, GitBranch, X, FileText } from 'lucide-react';
+import { AlertTriangle, ArrowUp, Brain, Clock, FileCode, Folder, KeyRound, Paperclip, Pencil, Quote, Sparkles, Square, SquareTerminal, Terminal, GitBranch, X, FileText } from 'lucide-react';
 import { ChatAttachment, QueuedPrompt, SlashCommand, TokenUsage } from '../../types/agent';
 import { useSlashCommandStore } from '../../store/useSlashCommandStore';
 import { rankByQuery } from '../../lib/fuzzy';
@@ -14,6 +14,7 @@ import { PermissionModeButton } from './PermissionModeButton';
 import { VyceModelChip } from './VyceModelChip';
 import { OpenCodeModelChip } from './OpenCodeModelChip';
 import { ZaiModelChip } from './ZaiModelChip';
+import { ByokModelChip } from './ByokModelChip';
 import { TokenUsageTooltip } from './TokenUsageTooltip';
 import { CircularQuotaWidget } from './CircularQuotaWidget';
 
@@ -41,7 +42,7 @@ interface ChatInputProps {
    * `vyce` drives the Vyce Code TUI in a hidden console, so the model picker, the permission switch
    * and the quota ring do not apply to either.
    */
-  engine?: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'vyce' | 'opencode';
+  engine?: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'vyce' | 'opencode' | 'byok';
   /** Null until the host has answered; drives the sign-in bar for a DeepSeek session. */
   deepSeekSignedIn?: boolean | null;
   /** Opens the one-time DeepSeek sign-in window. */
@@ -447,6 +448,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const isOpenCode = engine === 'opencode';
   /** Z.ai is a page we drive, like DeepSeek, so it carries its own model chip and no quota ring. */
   const isZai = engine === 'zai';
+  /** Bring-your-own-key runs the Claude Code CLI against the pasted provider. */
+  const isByok = engine === 'byok';
   /** Vyce is the Vyce Code TUI, driven in a hidden console: no model picker, no policy switch. */
   const isVyce = engine === 'vyce';
   /** One-time hint that a guest account is the weaker way to use Qwen. */
@@ -933,6 +936,25 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
                 <PermissionModeButton profileName={profileName} engine="zai" />
               </>
+            ) : isByok ? (
+              <>
+                <span
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] text-amber-400"
+                  title="Answers come from the Claude Code CLI, on the key and base URL you added"
+                >
+                  <KeyRound className="h-3 w-3" />
+                  Your key
+                </span>
+
+                <span className="opacity-30">|</span>
+
+                <ByokModelChip sessionId={sessionId} model={activeModel} />
+
+                <span className="opacity-30">|</span>
+
+                {/* The CLI needs this flag before it may touch a file without asking. */}
+                <PermissionModeButton profileName={profileName} engine="byok" />
+              </>
             ) : isDeepSeek || isQwen ? (
               /* No model to pick and no permission policy to set: the engine is a web chat, which
                  decides both. Showing Gemini here was simply wrong. */
@@ -1007,7 +1029,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
           {/* Right: quota ring, optional token readout, then the single morphing action button */}
           <div className="flex flex-shrink-0 items-center space-x-2.5">
-            {isDeepSeek || isQwen || isZai || isVyce || isOpenCode ? null : <CircularQuotaWidget profileName={profileName} />}
+            {/* The ring is an Antigravity profile's Gemini allowance. Any engine that answers from
+                somewhere else has no such number, and showing one invented a quota for the wrong
+                account. */}
+            {isDeepSeek || isQwen || isZai || isVyce || isOpenCode || isByok ? null : (
+              <CircularQuotaWidget profileName={profileName} />
+            )}
 
             {turnTokens > 0 ? (
               <TokenUsageTooltip turn={lastTurnTokens} session={sessionTokens} turns={turnCount} />

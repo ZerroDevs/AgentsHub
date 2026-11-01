@@ -208,10 +208,6 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
             using var anthropicDoc = JsonDocument.Parse(requestBody);
             var root = anthropicDoc.RootElement;
 
-            // Resolve failover pool of API keys
-            var activeProv = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
-            var keysPool = activeProv.GetEffectiveApiKeys();
-
             string? headerApiKey = req.Headers["x-api-key"];
             if (string.IsNullOrWhiteSpace(headerApiKey))
             {
@@ -221,6 +217,22 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                     headerApiKey = authHeader[7..].Trim();
                 }
             }
+
+            // The CLI is handed a token that names the provider it must reach, so a turn goes to the
+            // provider it chose even when another one is the app's current default.
+            string? requestedProviderId = null;
+            const string tokenPrefix = "agentshub-bridge:";
+            if (headerApiKey is not null && headerApiKey.StartsWith(tokenPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                requestedProviderId = headerApiKey[tokenPrefix.Length..].Trim();
+            }
+
+            var activeProv = (requestedProviderId is { Length: > 0 }
+                    ? AiConfigService.Instance.GetClaudeGatewayProviders().FirstOrDefault(p => string.Equals(p.Id, requestedProviderId, StringComparison.OrdinalIgnoreCase))
+                    : null)
+                ?? AiConfigService.Instance.GetActiveClaudeGatewayProvider();
+
+            var keysPool = activeProv.GetEffectiveApiKeys();
 
             if (keysPool.Count == 0)
             {
@@ -233,20 +245,18 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
 
             // No caller key means no upstream call. With no configured pool, a caller may bring
             // its own key and spend that key; it is never served by the stored pool by accident.
-            if (string.IsNullOrWhiteSpace(headerApiKey))
+            if (string.IsNullOrWhiteSpace(headerApiKey) && keysPool.Count == 0)
             {
-                await SendAnthropicErrorAsync(resp, HttpStatusCode.Unauthorized, "Unauthorized: the local proxy requires an API key.", ct).ConfigureAwait(false);
+                await SendAnthropicErrorAsync(resp, HttpStatusCode.Unauthorized, "Unauthorized: no key is configured for this provider.", ct).ConfigureAwait(false);
                 return;
             }
 
+            // The pool belongs to the provider, not to whoever called in. A caller key is only used
+            // when the provider has none: the CLI reaches this port with whatever token the app told
+            // it to send, and that token is not the upstream secret.
             if (keysPool.Count == 0)
             {
                 keysPool.Add(headerApiKey);
-            }
-            else if (!keysPool.Contains(headerApiKey, StringComparer.Ordinal))
-            {
-                await SendAnthropicErrorAsync(resp, HttpStatusCode.Unauthorized, "Unauthorized: the local proxy requires the configured API key.", ct).ConfigureAwait(false);
-                return;
             }
 
             // Resolve target model
@@ -260,8 +270,16 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
             var openAiPayload = TranslateAnthropicToOpenAi(root, model, isStream);
             var openAiJson = openAiPayload.ToJsonString();
 
-            // Resolve upstream destination: default to OpenRouter
-            var upstreamUrl = "https://openrouter.ai/api/v1/chat/completions";
+            // The provider says where requests go. Any OpenAI-compatible base URL works here; this
+            // is the only place the app commits to one upstream shape.
+            string upstreamUrl = activeProv.BaseUrl.Trim().TrimEnd('/') + "/chat/completions";
+
+            // Reasoning models put their thinking ahead of the answer. Claude Code asks for it with
+            // an Anthropic `thinking` budget, which is translated to the OpenAI-style flag below. A
+            // gateway that refuses that flag would otherwise fail every turn, so one retry is made
+            // without it.
+            bool reasoningRequested = openAiPayload.ContainsKey("reasoning");
+            bool reasoningDropped = false;
 
             int totalKeys = keysPool.Count;
             int startIdx;
@@ -317,6 +335,18 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                 string cleanMsg = ExtractErrorMessage(errContent) ?? $"Upstream provider returned HTTP {(int)upstreamResp.StatusCode}";
                 lastErrorMessage = cleanMsg;
                 lastStatusCode = upstreamResp.StatusCode;
+
+                if (upstreamResp.StatusCode == HttpStatusCode.BadRequest && reasoningRequested && !reasoningDropped)
+                {
+                    LogMessage?.Invoke("[Local Proxy] Gateway refused the reasoning flag; retrying this key without it.");
+                    reasoningDropped = true;
+                    openAiPayload.Remove("reasoning");
+                    openAiPayload.Remove("include_reasoning");
+                    openAiJson = openAiPayload.ToJsonString();
+                    upstreamResp.Dispose();
+                    attempt--;
+                    continue;
+                }
 
                 bool isRateLimit = IsRateLimit(upstreamResp.StatusCode, cleanMsg);
                 if (isRateLimit && totalKeys > 1 && attempt < totalKeys - 1)
@@ -391,6 +421,27 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
         if (root.TryGetProperty("temperature", out var tempEl) && tempEl.ValueKind == JsonValueKind.Number)
         {
             openAiObj["temperature"] = tempEl.GetDouble();
+        }
+
+        // Claude Code asks for thinking with a token budget. OpenAI-style gateways spell the same
+        // request `reasoning`, and most of them only return the thought when asked.
+        if (root.TryGetProperty("thinking", out var thinkingEl) && thinkingEl.ValueKind == JsonValueKind.Object)
+        {
+            bool disabled = thinkingEl.TryGetProperty("type", out var thinkTypeEl)
+                && string.Equals(thinkTypeEl.GetString(), "disabled", StringComparison.OrdinalIgnoreCase);
+
+            if (!disabled)
+            {
+                var reasoning = new JsonObject { ["enabled"] = true };
+
+                if (thinkingEl.TryGetProperty("budget_tokens", out var budgetEl) && budgetEl.ValueKind == JsonValueKind.Number)
+                {
+                    reasoning["max_tokens"] = budgetEl.GetInt32();
+                }
+
+                openAiObj["reasoning"] = reasoning;
+                openAiObj["include_reasoning"] = true;
+            }
         }
 
         var openAiMessages = new JsonArray();
@@ -623,11 +674,21 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
 
         int currentContentBlockIndex = -1;
         bool isTextBlockActive = false;
+        int thinkingBlockIndex = -1;
+        bool isThinkingActive = false;
         int activeToolBlockIndex = -1;
         var activeToolCalls = new Dictionary<int, string>(); // map openai tool index to anthropic content block index
         int nextBlockIndex = 0;
         int outputTokensCount = 0;
         string stopReason = "end_turn";
+
+        // Closes the open blocks in the order Anthropic requires: one block at a time, each stop
+        // after its own deltas.
+        async Task CloseBlockAsync(int index)
+        {
+            var blockStop = new { type = "content_block_stop", index };
+            await WriteSseEventAsync(output, "content_block_stop", JsonSerializer.Serialize(blockStop), ct).ConfigureAwait(false);
+        }
 
         string? line;
         while ((line = await reader.ReadLineAsync(ct).ConfigureAwait(false)) != null)
@@ -667,6 +728,53 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
 
                 if (!choice.TryGetProperty("delta", out var deltaEl)) continue;
 
+                // Reasoning arrives as `reasoning_content` (DeepSeek, Moonshot, unorouter) or
+                // `reasoning` (OpenRouter). Claude Code reads Anthropic thinking blocks, so a
+                // dropped delta means a Thought node that says "Reasoning is streaming in..." and
+                // never receives anything.
+                string? reasoningChunk = null;
+                foreach (string reasoningField in new[] { "reasoning_content", "reasoning", "thinking" })
+                {
+                    if (!deltaEl.TryGetProperty(reasoningField, out var reasoningEl) || reasoningEl.ValueKind != JsonValueKind.String)
+                    {
+                        continue;
+                    }
+
+                    reasoningChunk = reasoningEl.GetString();
+                    if (!string.IsNullOrEmpty(reasoningChunk)) break;
+                }
+
+                if (!string.IsNullOrEmpty(reasoningChunk))
+                {
+                    if (isTextBlockActive)
+                    {
+                        await CloseBlockAsync(currentContentBlockIndex).ConfigureAwait(false);
+                        isTextBlockActive = false;
+                    }
+
+                    if (!isThinkingActive)
+                    {
+                        thinkingBlockIndex = nextBlockIndex++;
+                        isThinkingActive = true;
+
+                        var thinkingStart = new
+                        {
+                            type = "content_block_start",
+                            index = thinkingBlockIndex,
+                            content_block = new { type = "thinking", thinking = "" }
+                        };
+                        await WriteSseEventAsync(output, "content_block_start", JsonSerializer.Serialize(thinkingStart), ct).ConfigureAwait(false);
+                    }
+
+                    var thinkingDelta = new
+                    {
+                        type = "content_block_delta",
+                        index = thinkingBlockIndex,
+                        delta = new { type = "thinking_delta", thinking = reasoningChunk }
+                    };
+                    await WriteSseEventAsync(output, "content_block_delta", JsonSerializer.Serialize(thinkingDelta), ct).ConfigureAwait(false);
+                }
+
                 // Handle text content delta
                 if (deltaEl.TryGetProperty("content", out var contentEl) && contentEl.ValueKind == JsonValueKind.String)
                 {
@@ -674,6 +782,12 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                     if (!string.IsNullOrEmpty(textChunk))
                     {
                         outputTokensCount++;
+
+                        if (isThinkingActive)
+                        {
+                            await CloseBlockAsync(thinkingBlockIndex).ConfigureAwait(false);
+                            isThinkingActive = false;
+                        }
 
                         if (!isTextBlockActive)
                         {
@@ -725,11 +839,16 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                         // If new tool call started
                         if (!activeToolCalls.TryGetValue(tcIdx, out string? value))
                         {
-                            // Close active text block if open
+                            // Close active thinking and text blocks if open
+                            if (isThinkingActive)
+                            {
+                                await CloseBlockAsync(thinkingBlockIndex).ConfigureAwait(false);
+                                isThinkingActive = false;
+                            }
+
                             if (isTextBlockActive)
                             {
-                                var blockStop = new { type = "content_block_stop", index = currentContentBlockIndex };
-                                await WriteSseEventAsync(output, "content_block_stop", JsonSerializer.Serialize(blockStop), ct).ConfigureAwait(false);
+                                await CloseBlockAsync(currentContentBlockIndex).ConfigureAwait(false);
                                 isTextBlockActive = false;
                             }
 
@@ -775,10 +894,15 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
         }
 
         // Close any lingering open content block
+        if (isThinkingActive)
+        {
+            await CloseBlockAsync(thinkingBlockIndex).ConfigureAwait(false);
+            isThinkingActive = false;
+        }
+
         if (isTextBlockActive)
         {
-            var blockStop = new { type = "content_block_stop", index = currentContentBlockIndex };
-            await WriteSseEventAsync(output, "content_block_stop", JsonSerializer.Serialize(blockStop), ct).ConfigureAwait(false);
+            await CloseBlockAsync(currentContentBlockIndex).ConfigureAwait(false);
         }
         foreach (var kvp in activeToolCalls)
         {
@@ -829,6 +953,28 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
 
             if (firstChoice.TryGetProperty("message", out var msgEl))
             {
+                // A reasoning model answers with its thought beside the text. Anthropic carries that
+                // as a thinking block, which is what lets a non-streamed turn still show one.
+                string? reasoning = null;
+                foreach (string reasoningField in new[] { "reasoning_content", "reasoning", "thinking" })
+                {
+                    if (msgEl.TryGetProperty(reasoningField, out var reasoningEl) && reasoningEl.ValueKind == JsonValueKind.String)
+                    {
+                        reasoning = reasoningEl.GetString();
+                        if (!string.IsNullOrEmpty(reasoning)) break;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(reasoning))
+                {
+                    contentArray.Add(new JsonObject
+                    {
+                        ["type"] = "thinking",
+                        ["thinking"] = reasoning,
+                        ["signature"] = string.Empty
+                    });
+                }
+
                 if (msgEl.TryGetProperty("content", out var cEl) && cEl.ValueKind == JsonValueKind.String)
                 {
                     var text = cEl.GetString();

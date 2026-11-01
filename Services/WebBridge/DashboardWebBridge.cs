@@ -118,6 +118,10 @@ public sealed partial class DashboardWebBridge : IDisposable
         // visible in the HUD. Everything the manager reports now lands in Live Logs too.
         _cliManager.LogMessage += OnCliManagerLog;
 
+        // The local model server writes its own load and error lines. They belong in Live Logs under
+        // their own tag, next to the CLI output they explain.
+        Services.LlamaCpp.LlamaCppService.Instance.LogEmitted += (level, message) => EmitLog("llama.cpp", level, message);
+
         HookBackendEvents();
     }
 
@@ -1318,6 +1322,74 @@ public sealed partial class DashboardWebBridge : IDisposable
                 await HandleRunDependencyCliAsync(data, requestId).ConfigureAwait(false);
                 break;
 
+            case "llamacpp_status":
+                await HandleLlamaCppStatusAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_start":
+                await HandleLlamaCppStartAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_stop":
+                await HandleLlamaCppStopAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_use":
+                await HandleLlamaCppUseAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_browse":
+                await HandleLlamaCppBrowseAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_check_update":
+                await HandleLlamaCppCheckUpdateAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_update":
+                await HandleLlamaCppUpdateAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_list":
+                await HandleLocalModelsListAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_search":
+                await HandleLocalModelsSearchAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_files":
+                await HandleLocalModelsFilesAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_download":
+                await HandleLocalModelsDownloadAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_cancel_download":
+                await HandleLocalModelsCancelDownloadAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_add_file":
+                await HandleLocalModelsAddFileAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_add_folder":
+                await HandleLocalModelsAddFolderAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_forget":
+                await HandleLocalModelsForgetAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_open_folder":
+                await HandleLocalModelsOpenFolderAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_run":
+                await HandleLocalModelsRunAsync(data, requestId).ConfigureAwait(false);
+                break;
+
             case "open_terminal_at":
                 await HandleOpenTerminalAtAsync(data, requestId).ConfigureAwait(false);
                 break;
@@ -1472,6 +1544,18 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             case "select_claude_gateway_provider":
                 await HandleSelectClaudeGatewayProviderAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "claude_gateway_fetch_models":
+                await HandleClaudeGatewayFetchModelsAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "claude_gateway_set_model":
+                await HandleClaudeGatewaySetModelAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "byok_models":
+                await HandleByokModelsAsync(requestId).ConfigureAwait(false);
                 break;
 
             case "get_claude_settings":

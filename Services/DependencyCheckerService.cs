@@ -21,6 +21,12 @@ public sealed class DependencyDefinition
     /// <summary>Full command line for the winget / powershell install kinds.</summary>
     public string InstallCommand { get; init; } = "";
 
+    /// <summary>
+    /// The same install on macOS and Linux, when the vendor ships a different script there. Empty
+    /// means the Windows command is already portable shell and is reused as-is.
+    /// </summary>
+    public string UnixInstallCommand { get; init; } = "";
+
     /// <summary>Short form shown in the UI when the tool is missing.</summary>
     public string CommandPreview { get; init; } = "";
 
@@ -96,6 +102,36 @@ public static class DependencyCheckerService
             InstallCommand = "winget install OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements",
             CommandPreview = "winget install OpenJS.NodeJS.LTS",
             Commands = ["node"]
+        },
+        new DependencyDefinition
+        {
+            Id = "llamacpp",
+            Name = "Llama.cpp (local models)",
+            ChatSupported = true,
+            Description = "Runs open models on this machine. Not required, only for chats that should answer locally.",
+            Category = "runtime",
+            InstallKind = "powershell",
+            SiteUrl = "https://llama.app/",
+            // The vendor's own installer: one binary, GPU backend picked by probing the machine.
+            InstallCommand = "irm https://llama.app/install.ps1 | iex",
+            UnixInstallCommand = "curl -LsSf https://llama.app/install.sh | sh",
+            CommandPreview = "irm https://llama.app/install.ps1 | iex",
+            // `llama` is the vendor front end; `llama-server` is what a hand-built tree produces.
+            Commands = ["llama", "llama-server"],
+            FallbackPaths =
+            [
+                @"%LOCALAPPDATA%\Microsoft\WindowsApps\llama.exe",
+                @"%LOCALAPPDATA%\Microsoft\WindowsApps\llama-server.exe",
+                @"%LOCALAPPDATA%\llama-app\llama.exe",
+                @"%USERPROFILE%\llama.cpp\build\bin\llama-server.exe",
+                @"C:\llama.cpp\build\bin\llama-server.exe",
+                @"~/.local/bin/llama-server",
+                @"~/.local/bin/llama",
+                @"/usr/local/bin/llama-server",
+                @"/usr/local/bin/llama",
+                @"/opt/homebrew/bin/llama-server",
+                @"/opt/homebrew/bin/llama"
+            ]
         },
         new DependencyDefinition
         {

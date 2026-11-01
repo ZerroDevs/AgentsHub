@@ -247,6 +247,36 @@ public sealed partial class DashboardWebBridge : IDisposable
             SendResponse(requestId, true, new { started = true, engine = "opencode" });
             return;
         }
+        // A Bring-Your-Own-Key turn: the Claude Code CLI runs in the working directory with the
+        // provider's base URL and key in its environment, so tools, skills and thinking are the
+        // CLI's own and do not have to be rebuilt here.
+        if (string.Equals(engine, "byok", StringComparison.OrdinalIgnoreCase))
+        {
+            string? byokModel = model;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await DispatchByokAsync(sessionId, prompt, conversationId, cwd, skipPermissions, byokModel)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    PostEventToUi("session_status", new
+                    {
+                        sessionId,
+                        state = "error",
+                        error = ex.Message,
+                        timestamp = DateTime.UtcNow.ToString("O"),
+                    });
+                }
+            });
+
+            SendResponse(requestId, true, new { sent = true, sessionId, engine = "byok" });
+            return;
+        }
+
         if (string.Equals(engine, "zai", StringComparison.OrdinalIgnoreCase))
         {
             // Fire and forget for the same reason DeepSeek is: a turn can prime, run several tool
@@ -531,6 +561,9 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             // OpenCode is a process per turn; stopping means killing its tree.
             Services.OpenCode.OpenCodeEngine.Instance.Stop();
+
+            // BYOK runs the Claude Code CLI as a child of this process, so it is killed the same way.
+            Services.Byok.ByokEngine.Instance.Stop();
 #endif
             await Sidecar.SidecarHostService.Instance.AbortTaskAsync(taskId, reason).ConfigureAwait(false);
             SendResponse(requestId, true, new { aborted = true, taskId });

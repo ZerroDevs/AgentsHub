@@ -214,6 +214,93 @@ class WebViewBridge {
           notifications: true,
         },
       };
+    } else if (action === 'get_claude_gateway_config') {
+      // Lets the browser dev host render the API-key panel with a realistic shape.
+      mockData = {
+        selectedGatewayId: 'preset_openrouter',
+        activeId: 'preset_openrouter',
+        injectionEnabled: true,
+        providers: [
+          {
+            id: 'preset_openrouter',
+            name: 'OpenRouter',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            apiKey: 'sk-or-v1-example',
+            apiKeys: ['sk-or-v1-example'],
+            isPreset: true,
+            protocol: 'openai',
+            useBridge: true,
+            models: ['anthropic/claude-sonnet-4.5', 'google/gemini-2.5-pro', 'qwen/qwen3-coder'],
+            selectedModel: 'anthropic/claude-sonnet-4.5',
+          },
+          {
+            id: 'preset_anthropic',
+            name: 'Anthropic',
+            baseUrl: 'https://api.anthropic.com',
+            apiKey: '',
+            apiKeys: [],
+            isPreset: true,
+            protocol: 'anthropic',
+            useBridge: true,
+            models: [],
+            selectedModel: '',
+          },
+        ],
+        activeProvider: {
+          id: 'preset_openrouter',
+          name: 'OpenRouter',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          apiKey: 'sk-or-v1-example',
+          apiKeys: ['sk-or-v1-example'],
+          isPreset: true,
+          protocol: 'openai',
+          useBridge: true,
+          models: ['anthropic/claude-sonnet-4.5', 'google/gemini-2.5-pro', 'qwen/qwen3-coder'],
+          selectedModel: 'anthropic/claude-sonnet-4.5',
+        },
+      };
+    } else if (action === 'claude_gateway_fetch_models') {
+      // A static list that looks like a real gateway answer, so the dev host can exercise the modal.
+      mockData = {
+        saved: true,
+        providerId: String(payload.providerId ?? ''),
+        count: 14,
+        models: [
+          'anthropic/claude-sonnet-4.5',
+          'anthropic/claude-haiku-4.5',
+          'openai/gpt-5.1',
+          'google/gemini-3-pro',
+          'qwen/qwen3-coder',
+          'deepseek/deepseek-v3.2',
+          'moonshot/kimi-k2',
+          'x-ai/grok-4',
+          'qwen/qwen-2.5-coder-32b-instruct:free',
+          'deepseek/deepseek-r1:free',
+          'google/gemini-2.0-flash-exp:free',
+          'meta-llama/llama-3.3-70b-instruct:free',
+          'mistralai/mistral-small-24b-instruct-2501',
+          'minimax/minimax-01:free',
+        ],
+      };
+    } else if (action === 'save_claude_gateway_config' || action === 'add_claude_gateway_provider') {
+      const keys = Array.isArray(payload.apiKeys) ? payload.apiKeys : payload.apiKey ? [payload.apiKey] : [];
+      mockData = {
+        success: true,
+        provider: {
+          id: String(payload.providerId || 'custom_dev'),
+          name: String(payload.name ?? 'Provider'),
+          baseUrl: String(payload.baseUrl ?? ''),
+          apiKey: String(keys[0] ?? ''),
+          apiKeys: keys,
+          isPreset: false,
+          protocol: payload.protocol === 'anthropic' ? 'anthropic' : 'openai',
+          useBridge: payload.useBridge !== false,
+          models: Array.isArray(payload.models) ? payload.models : [],
+          selectedModel: String(payload.selectedModel ?? ''),
+        },
+      };
+    } else if (action === 'claude_gateway_set_model' || action === 'select_claude_gateway_provider' || action === 'toggle_claude_injection') {
+      mockData = { success: true };
     } else if (action === 'get_model_catalog') {
       // Mirrors the real `agy models` output so the browser dev host can render the selector.
       mockData = {

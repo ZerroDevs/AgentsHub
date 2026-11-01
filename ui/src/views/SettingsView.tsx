@@ -64,6 +64,8 @@ function dependencyIcon(id: string) {
       return <Code2 className={cls} />;
     case 'opencode':
       return <Terminal className={cls} />;
+    case 'llamacpp':
+      return <Cpu className={cls} />;
     default:
       return <Package className={cls} />;
   }
@@ -87,6 +89,78 @@ export const SettingsView: React.FC = () => {
   // The log console is the only scroll container on this page. Auto-Scroll used to flip a label
   // without touching it, so new lines landed below the fold.
   const logConsoleRef = useRef<HTMLDivElement | null>(null);
+
+  // Local models. The server is a child process of the app, so this panel is the only place it is
+  // started and stopped; a chat just uses the provider that points at it.
+  const [llama, setLlama] = useState<any | null>(null);
+  const [llamaBusy, setLlamaBusy] = useState(false);
+  const [llamaUpdate, setLlamaUpdate] = useState<any | null>(null);
+  const [llamaUpdateBusy, setLlamaUpdateBusy] = useState(false);
+
+  const loadLlama = async () => {
+    try {
+      setLlama(await webviewBridge.invoke('llamacpp_status'));
+    } catch {
+      setLlama(null);
+    }
+  };
+
+  useEffect(() => {
+    void loadLlama();
+  }, []);
+
+  const runLlama = async (action: 'llamacpp_start' | 'llamacpp_stop' | 'llamacpp_use') => {
+    setLlamaBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke(action);
+      setLlama(res?.status ?? res);
+    } catch {
+      await loadLlama();
+    } finally {
+      setLlamaBusy(false);
+    }
+  };
+
+  // A tree built by hand lives wherever the person put it, so the picker is the only reliable way
+  // to find it; the answer carries the re-detected status so the card settles without a refresh.
+  const browseLlama = async () => {
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_browse');
+      if (res?.status) setLlama(res.status);
+    } catch {
+      // A cancelled picker is not an error.
+    }
+  };
+
+  const checkLlamaUpdate = async () => {
+    setLlamaUpdateBusy(true);
+    try {
+      setLlamaUpdate(await webviewBridge.invoke('llamacpp_check_update'));
+    } catch {
+      setLlamaUpdate({ ok: false, message: 'Could not check for updates.' });
+    } finally {
+      setLlamaUpdateBusy(false);
+    }
+  };
+
+  // Updating runs the same installer path as the runtime row, so its progress lines land in
+  // installLines underneath. A binary the app did not install comes back with needsRelease.
+  const updateLlama = async () => {
+    setLlamaUpdateBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_update');
+      if (res?.status) setLlama(res.status);
+      setLlamaUpdate({
+        message: res?.message ?? '',
+        url: res?.url ?? '',
+        needsRelease: res?.needsRelease ?? false,
+      });
+    } catch {
+      setLlamaUpdate({ message: 'The update could not be run.' });
+    } finally {
+      setLlamaUpdateBusy(false);
+    }
+  };
 
   const {
     settings,
@@ -1267,6 +1341,183 @@ export const SettingsView: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Local models: llama.cpp. Off unless someone starts it, because a local model
+                    costs RAM and a GPU slot that a person who never runs one should not pay. */}
+                <div className="space-y-2 pt-3 border-t border-[var(--border-subtle,#1E293B)]">
+                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                    <div>
+                      <div className="text-xs font-semibold text-accent">Local models (llama.cpp)</div>
+                      <p className="text-[10.5px] text-content-dim mt-0.5">
+                        Run open models on this machine. Optional: only needed for chats that should
+                        answer locally.{' '}
+                        <a
+                          href="https://llama.app/docs/quickstart"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          How it works
+                        </a>
+                      </p>
+                    </div>
+
+                    <span
+                      className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
+                        llama?.running
+                          ? 'bg-emerald-500/10 text-state-success border-emerald-500/20'
+                          : llama?.installed
+                            ? 'bg-slate-500/10 text-content-dim border-slate-500/20'
+                            : 'bg-rose-500/10 text-state-danger border-rose-500/20'
+                      }`}
+                    >
+                      {llama?.running ? 'Serving' : llama?.installed ? 'Stopped' : 'Not installed'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-[var(--bg-input,#0D1322)] border border-[var(--border-subtle,#1E293B)] space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] uppercase tracking-wide text-content-dim">Server</span>
+                      <span
+                        className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-main"
+                        title={llama?.path || 'No llama.cpp binary found yet'}
+                      >
+                        {llama?.path || 'Not found'}
+                      </span>
+                      {llama?.usesCustomPath ? (
+                        <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 text-[9.5px] font-mono text-accent">
+                          your file
+                        </span>
+                      ) : null}
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] uppercase tracking-wide text-content-dim">Endpoint</span>
+                      <span className="font-mono text-[11px] text-content-dim break-all">
+                        {llama?.endpoint ?? 'http://127.0.0.1:9931/v1'}
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] text-content-dim">
+                      {llama?.message ??
+                        'Not checked yet. Start the server to run models from this machine.'}
+                    </p>
+
+                    {llama?.installed ? null : (
+                      <p className="text-[11px] text-content-dim">
+                        Nothing found on PATH or in the usual build folders. Download it, or point at
+                        a <code className="font-mono text-accent">llama-server</code> you already have.
+                      </p>
+                    )}
+
+                    {llamaUpdate?.message ? (
+                      <p
+                        className={`text-[11px] ${
+                          llamaUpdate.updateAvailable ? 'text-state-warning' : 'text-content-dim'
+                        }`}
+                      >
+                        {llamaUpdate.message}{' '}
+                        {(llamaUpdate.updateAvailable || llamaUpdate.needsRelease) && llamaUpdate.url ? (
+                          <a
+                            href={llamaUpdate.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-accent hover:underline"
+                          >
+                            Open release
+                          </a>
+                        ) : null}
+                      </p>
+                    ) : null}
+
+                    <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                      {llama?.installed ? (
+                        <Button
+                          variant="secondary"
+                          size="xs"
+                          disabled={llamaBusy || llama?.running}
+                          leftIcon={<Play className="h-3 w-3" />}
+                          onClick={() => void runLlama('llamacpp_start')}
+                        >
+                          {llamaBusy ? 'Working…' : 'Start server'}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="primary"
+                          size="xs"
+                          disabled={installingId === 'llamacpp'}
+                          leftIcon={<Download className="h-3 w-3" />}
+                          onClick={() => runDependencyInstall('llamacpp')}
+                        >
+                          {installingId === 'llamacpp' ? 'Downloading…' : 'Download llama.cpp'}
+                        </Button>
+                      )}
+
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        disabled={llamaBusy || !llama?.running}
+                        leftIcon={<Power className="h-3 w-3" />}
+                        onClick={() => void runLlama('llamacpp_stop')}
+                      >
+                        Stop
+                      </Button>
+
+                      <Button
+                        variant="primary"
+                        size="xs"
+                        disabled={llamaBusy || !llama?.installed}
+                        leftIcon={<MessageSquare className="h-3 w-3" />}
+                        onClick={() => void runLlama('llamacpp_use')}
+                        title="Start the server if needed and make llama.cpp the provider new chats use"
+                      >
+                        Use in chat
+                      </Button>
+
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        leftIcon={<FolderOpen className="h-3 w-3" />}
+                        onClick={() => void browseLlama()}
+                      >
+                        Locate…
+                      </Button>
+
+                      {llamaUpdate?.updateAvailable ? (
+                        <Button
+                          variant="primary"
+                          size="xs"
+                          disabled={llamaUpdateBusy}
+                          leftIcon={<Download className={`h-3 w-3 ${llamaUpdateBusy ? 'animate-spin' : ''}`} />}
+                          onClick={() => void updateLlama()}
+                          title="Runs the llama.app installer. A binary you placed by hand is left untouched; the installed build becomes the server."
+                        >
+                          {llamaUpdateBusy ? 'Updating…' : 'Update now'}
+                        </Button>
+                      ) : null}
+
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        disabled={llamaUpdateBusy || !llama?.installed}
+                        leftIcon={<RefreshCw className={`h-3 w-3 ${llamaUpdateBusy ? 'animate-spin' : ''}`} />}
+                        onClick={() => void checkLlamaUpdate()}
+                      >
+                        Check updates
+                      </Button>
+
+                      <Button variant="secondary" size="xs" onClick={() => void loadLlama()}>
+                        Refresh
+                      </Button>
+                    </div>
+
+                    {installLines['llamacpp'] ? (
+                      <p className="text-[10.5px] font-mono text-accent break-all">
+                        {installLines['llamacpp']}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+
                 {/* Group 2: AI Agents & Network Tools */}
                 <div className="space-y-2 pt-3 border-t border-[var(--border-subtle,#1E293B)]">
                   <div>
@@ -2152,7 +2403,7 @@ export const SettingsView: React.FC = () => {
 
                 {/* Filter pills */}
                 <div className="flex items-center gap-1.5 overflow-x-auto text-xs">
-                  {['all', 'error', 'warn', 'system', 'clis'].map(f => (
+                  {['all', 'error', 'warn', 'system', 'clis', 'llama.cpp'].map(f => (
                     <button
                       key={f}
                       onClick={() => setLogsFilter(f)}

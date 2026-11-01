@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, Brain, ChevronDown, ChevronRight, File, FileCode, FileText, Filter, Folder, FolderOpen, GitBranch, Loader2, Plus, Settings, SquareTerminal, Terminal, Trash2, Zap } from 'lucide-react';
+import { Sparkles, Brain, ChevronDown, ChevronRight, Cpu, File, FileCode, FileText, Filter, Folder, FolderOpen, GitBranch, KeyRound, Loader2, Plus, Settings, SquareTerminal, Terminal, Trash2, Zap } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useSessionStore } from '../../store/useSessionStore';
 import { useProfileStore } from '../../store/useProfileStore';
@@ -122,7 +122,7 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
 
   const startSession = (
     workspaceId: string | null,
-    engine: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'vyce' | 'opencode'
+    engine: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'vyce' | 'opencode' | 'byok'
   ) => {
     setNewSessionMenu(null);
 
@@ -137,6 +137,28 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
         .then((res: any) => (res?.signedIn ? null : webviewBridge.invoke('deepseek_login')))
         .catch(() => {});
     }
+  };
+
+  /**
+   * A local chat needs something to answer with before the session exists. This starts the local
+   * server, and if no model is loaded it runs the first one on the shelf instead of opening a chat
+   * that would fail on its first message.
+   */
+  const startLocalModelSession = async (workspaceId: string | null) => {
+    try {
+      const state: any = await webviewBridge.invoke('llamacpp_use');
+      const loaded = state?.provider?.models ?? [];
+
+      if (loaded.length === 0) {
+        const shelf: any = await webviewBridge.invoke('local_models_list');
+        const first = shelf?.models?.[0];
+        if (first?.path) await webviewBridge.invoke('local_models_run', { path: first.path });
+      }
+    } catch {
+      // The chat carries its own error state; a toast here would only duplicate it.
+    }
+
+    startSession(workspaceId, 'byok');
   };
 
   // Merge active local sessions with backend sessions
@@ -264,6 +286,7 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
               const isZai = (s as { engine?: string }).engine === 'zai';
               const isVyce = (s as { engine?: string }).engine === 'vyce';
               const isOpenCode = (s as { engine?: string }).engine === 'opencode';
+              const isByok = (s as { engine?: string }).engine === 'byok';
 
               if (isRenaming) {
                 return (
@@ -313,7 +336,7 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                   }`}
                   title={
                     s.isLocal
-                      ? `${s.goal || s.sessionId}${isQwen ? ' (Qwen, runs in this app)' : isZai ? ' (Z.ai GLM, runs in this app)' : isDeepSeek ? ' (DeepSeek, runs in this app)' : isVyce ? ' (Vyce Code, runs in a hidden console)' : isOpenCode ? ' (OpenCode, headless)' : ''}. Double-click to rename`
+                      ? `${s.goal || s.sessionId}${isQwen ? ' (Qwen, runs in this app)' : isZai ? ' (Z.ai GLM, runs in this app)' : isDeepSeek ? ' (DeepSeek, runs in this app)' : isVyce ? ' (Vyce Code, runs in a hidden console)' : isOpenCode ? ' (OpenCode, headless)' : isByok ? ' (Your API key, via the Claude Code CLI)' : ''}. Double-click to rename`
                       : `${s.goal || s.sessionId} — found in the CLI's own history. Not importable yet, so it cannot be opened here.`
                   }
                 >
@@ -341,6 +364,11 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                     <Terminal
                       className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-amber-400' : 'text-amber-400/70'}`}
                       aria-label="OpenCode chat"
+                    />
+                  ) : isByok ? (
+                    <KeyRound
+                      className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-amber-400' : 'text-amber-400/70'}`}
+                      aria-label="Chat on your own API key"
                     />
                   ) : (
                     <Zap className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-sky-400 fill-sky-400' : 'text-sky-500'}`} />
@@ -704,6 +732,34 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[11px] font-medium text-content-main">Use Z.ai (GLM)</span>
                       <span className="block truncate text-[9.5px] text-content-dim">Free as guest</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Bring your own API key: the Claude Code CLI, on your provider"
+                    onClick={() => startSession(newSessionMenu.workspaceId, 'byok')}
+                    className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none"
+                  >
+                    <img src={engineIcons.byok} alt="" className="mt-0.5 h-5 w-5 flex-shrink-0 object-contain" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[11px] font-medium text-content-main">Use your own key</span>
+                      <span className="block truncate text-[9.5px] text-content-dim">Claude Code CLI, any provider</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="llama.cpp: a model running on this machine"
+                    onClick={() => void startLocalModelSession(newSessionMenu.workspaceId)}
+                    className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none"
+                  >
+                    <Cpu className="mt-0.5 h-5 w-5 flex-shrink-0 text-accent" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[11px] font-medium text-content-main">Use a local model</span>
+                      <span className="block truncate text-[9.5px] text-content-dim">llama.cpp, on this machine</span>
                     </span>
                   </button>
 

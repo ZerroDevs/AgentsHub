@@ -118,6 +118,8 @@ export const engineIcons = {
   zai: chip,
   vyce,
   opencode,
+  /** Bring-your-own-key runs the Claude Code CLI, so it wears that sticker. */
+  byok: claude,
 } as const;
 
 /** Settings sections, keyed by the category id used in SettingsView. */

@@ -25,6 +25,7 @@ import { profileLabel } from '../lib/profileName';
 import { TerminalPanel } from '../components/terminal/TerminalPanel';
 import { webviewBridge } from '../services/webviewBridge';
 import { SelectionToolbar } from '../components/chat/SelectionToolbar';
+import { ByokProviderSwitcher } from '../components/chat/ByokProviderSwitcher';
 
 interface AgentChatViewProps {
   onOpenGitModal: () => void;
@@ -181,17 +182,20 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
 
   const isDeepSeek = activeSession?.engine === 'deepseek';
   /**
-   * The engines that run inside the host instead of the sidecar's CLI process: the two page engines
-   * and Vyce's hidden console. None of them has a runner process, so the runner bar does not apply.
+   * The engines that run inside the host instead of the sidecar's CLI process: the page engines,
+   * Vyce's hidden console, and bring-your-own-key, which spawns Claude Code itself. None of them has
+   * an Antigravity runner, so the runner bar and its "start it to send" gate do not apply.
    */
   const isHostEngine =
     isDeepSeek ||
     activeSession?.engine === 'qwen' ||
     activeSession?.engine === 'zai' ||
     activeSession?.engine === 'vyce' ||
+    activeSession?.engine === 'byok' ||
     activeSession?.engine === 'opencode';
   const isQwen = activeSession?.engine === 'qwen';
   const isZai = activeSession?.engine === 'zai';
+  const isByok = activeSession?.engine === 'byok';
 
   /**
    * Whether Z.ai has an account behind it. Guest use is supported, so this only decides whether the
@@ -602,6 +606,12 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
                 </button>
               ) : null}
             </div>
+          ) : null}
+
+          {/* A key chat has no runner, so its provider switcher stands where the runner dropdown
+              does. This is the one control that decides where its turns are sent. */}
+          {isByok && activeSession ? (
+            <ByokProviderSwitcher sessionId={activeSession.id} />
           ) : null}
 
           {/* Runner Dropdown with Multi-Profile Popover */}

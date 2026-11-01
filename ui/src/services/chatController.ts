@@ -31,7 +31,7 @@ function resolveContext(sessionId: string) {
   // OpenCode's ids are `provider/model` and belong to its own catalogue; resolving them against the
   // agy list would replace a real id with a guess.
   const model =
-    session?.engine === 'opencode' || session?.engine === 'zai'
+    session?.engine === 'opencode' || session?.engine === 'zai' || session?.engine === 'byok'
       ? session?.model || undefined
       : models.length > 0
         ? resolveModelId(models, session?.model, session?.reasoningEffort)

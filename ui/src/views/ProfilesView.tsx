@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { DeepSeekAccountsCard } from '../components/profiles/DeepSeekAccountsCard';
+import { ProviderKeyModal } from '../components/profiles/ProviderKeyModal';
+import { LocalModelsModal } from '../components/modals/LocalModelsModal';
 import {
   Users,
   Plus,
@@ -19,9 +21,6 @@ import {
   ExternalLink,
   Layers,
   Sparkles,
-  LogOut,
-  Sliders,
-  CheckCircle2,
   Star,
 } from 'lucide-react';
 import { useProfileStore } from '../store/useProfileStore';
@@ -59,17 +58,12 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
     deleteWorkspace,
   } = useWorkspaceStore();
 
-  // 1. Claude Gateway state
+  // The key manager is its own dialog; this only remembers whether it is open.
   const [isGatewayExpanded, setIsGatewayExpanded] = useState(false);
-  const [isInjectionEnabled, setIsInjectionEnabled] = useState(true);
-  const [gatewayProvider, setGatewayProvider] = useState('preset_local_proxy');
-  const [gatewayBaseUrl, setGatewayBaseUrl] = useState('http://127.0.1.1:9230');
-  const [apiKeys, setApiKeys] = useState<string[]>(['']);
-  const [visibleKeyIndices, setVisibleKeyIndices] = useState<Set<number>>(new Set());
-  const [keyHealthStatus, setKeyHealthStatus] = useState<string>('Ready');
-  const [freeModelsCount, setFreeModelsCount] = useState<string>('');
-  const [isFetchingModels, setIsFetchingModels] = useState(false);
-  const [isSavingProvider, setIsSavingProvider] = useState(false);
+
+  // The local model shelf sits next to the key manager: both answer "what can this thing talk to"
+  // without sending someone into Settings first.
+  const [isLocalModelsOpen, setIsLocalModelsOpen] = useState(false);
 
   // 2. Workspaces card state
   const [isWorkspacesExpanded, setIsWorkspacesExpanded] = useState(true);
@@ -92,37 +86,6 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
   useEffect(() => {
     loadWorkspaces();
   }, [loadWorkspaces]);
-
-  // Read once on mount. This used to hang off the workspaces effect, so every render re-asked the
-  // bridge, and an action the bridge does not implement filled the log with a warning each time.
-  useEffect(() => {
-    void loadClaudeGatewayConfig();
-  }, []);
-
-  const loadClaudeGatewayConfig = async () => {
-    try {
-      // The bridge answers `get_claude_gateway_config`; the base url and keys live on the active
-      // provider, not at the top level.
-      const res = await webviewBridge.invoke('get_claude_gateway_config');
-      if (res) {
-        if (res.selectedGatewayId) setGatewayProvider(res.selectedGatewayId);
-
-        const provider = res.activeProvider;
-        if (provider?.baseUrl) setGatewayBaseUrl(provider.baseUrl);
-        if (Array.isArray(provider?.apiKeys) && provider.apiKeys.length > 0) {
-          setApiKeys(provider.apiKeys);
-        } else if (provider?.apiKey) {
-          setApiKeys([provider.apiKey]);
-        }
-
-        if (res.injectionEnabled !== undefined) {
-          setIsInjectionEnabled(Boolean(res.injectionEnabled));
-        }
-      }
-    } catch {
-      // Default fallback
-    }
-  };
 
   const toggleEmailVisibility = (name: string) => {
     setVisibleEmails(prev => ({
@@ -181,78 +144,6 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
     if (confirm(`Delete Antigravity profile "${name}"?`)) {
       try {
         await webviewBridge.invoke('delete_antigravity_profile', { profileName: name });
-      } catch {}
-    }
-  };
-
-  // --- Claude Gateway Actions ---
-  const handleToggleInjection = async (checked: boolean) => {
-    setIsInjectionEnabled(checked);
-    try {
-      await webviewBridge.invoke('toggle_claude_injection', { enabled: checked });
-    } catch {}
-  };
-
-  const handleAddApiKeyRow = () => {
-    setApiKeys(prev => [...prev, '']);
-  };
-
-  const handleRemoveApiKeyRow = (index: number) => {
-    if (apiKeys.length <= 1) {
-      setApiKeys(['']);
-    } else {
-      setApiKeys(prev => prev.filter((_, i) => i !== index));
-    }
-  };
-
-  const handleApiKeyChange = (index: number, val: string) => {
-    setApiKeys(prev => {
-      const next = [...prev];
-      next[index] = val;
-      return next;
-    });
-  };
-
-  const toggleKeyReveal = (index: number) => {
-    setVisibleKeyIndices(prev => {
-      const next = new Set(prev);
-      if (next.has(index)) next.delete(index);
-      else next.add(index);
-      return next;
-    });
-  };
-
-  const handleSaveClaudeConfig = async () => {
-    setIsSavingProvider(true);
-    const validKeys = apiKeys.map(k => k.trim()).filter(Boolean);
-    try {
-      await webviewBridge.invoke('save_claude_gateway_config', {
-        providerId: gatewayProvider,
-        name: gatewayProvider === 'preset_local_proxy' ? 'Local Proxy' : 'OpenRouter Direct',
-        baseUrl: gatewayBaseUrl.trim(),
-        apiKey: validKeys[0] || '',
-        apiKeys: validKeys,
-      });
-      setKeyHealthStatus(validKeys.length > 0 ? `${validKeys.length} key(s) configured` : 'Ready (No key set)');
-    } catch {}
-    setIsSavingProvider(false);
-  };
-
-  const handleFetchFreeModels = async () => {
-    setIsFetchingModels(true);
-    try {
-      const res = await webviewBridge.invoke('refresh_openrouter_free_models');
-      if (res && res.models) {
-        setFreeModelsCount(`${res.models.length} free models available`);
-      }
-    } catch {}
-    setIsFetchingModels(false);
-  };
-
-  const handleClaudeLogout = async () => {
-    if (confirm('Clear stored Anthropic login tokens to ensure gateway proxy operates cleanly?')) {
-      try {
-        await webviewBridge.invoke('claude_logout');
       } catch {}
     }
   };
@@ -358,16 +249,27 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
             </details>
 
             <button
-              onClick={() => setIsGatewayExpanded(!isGatewayExpanded)}
-              title="Claude Code Gateway engine"
-              aria-label="Claude Code Gateway engine"
-              className={`flex h-8 w-8 items-center justify-center rounded-lg border transition ${
-                isInjectionEnabled
+              onClick={() => setIsGatewayExpanded(true)}
+              title="Your API keys"
+              aria-label="Your API keys"
+              className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] transition ${
+                isGatewayExpanded
                   ? 'border-emerald-500/40 bg-emerald-500/10 text-state-success'
                   : 'border-surface-border bg-surface-card text-content-muted hover:text-content-main'
               }`}
             >
-              <Shield className="h-4 w-4" />
+              <Shield className="h-3.5 w-3.5" />
+              <span>API keys</span>
+            </button>
+
+            <button
+              onClick={() => setIsLocalModelsOpen(true)}
+              title="Run models on this machine"
+              aria-label="Local models"
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-surface-border bg-surface-card px-2.5 text-[11px] text-content-muted transition hover:text-content-main"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span>Local Models</span>
             </button>
 
             <button
@@ -378,199 +280,6 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
               <span>New Profile</span>
             </button>
           </div>
-        </div>
-
-        {/* 1. Claude Code Gateway Engine: a floating panel, not a permanent card in the page. */}
-        {isGatewayExpanded ? (
-          <div
-            className="fixed inset-0 z-[79] bg-black/40 backdrop-blur-[1px]"
-            onClick={() => setIsGatewayExpanded(false)}
-          />
-        ) : null}
-
-        <div
-          className={
-            isGatewayExpanded
-              ? 'fixed left-1/2 top-16 z-[80] max-h-[78vh] w-[min(780px,92vw)] -translate-x-1/2 overflow-y-auto rounded-2xl border border-surface-border bg-surface-card p-4 shadow-2xl'
-              : 'hidden'
-          }
-        >
-          <div
-            className="flex items-center justify-between cursor-pointer flex-wrap gap-2"
-            onClick={() => setIsGatewayExpanded(!isGatewayExpanded)}
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-state-success">
-                <Shield className="w-4 h-4" />
-              </div>
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <span className="text-xs font-bold text-content-main">Claude Code Gateway Engine</span>
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded font-mono font-semibold border ${
-                    isInjectionEnabled
-                      ? 'bg-emerald-500/15 text-state-success border-emerald-500/30'
-                      : 'bg-slate-800 text-content-muted border-surface-border'
-                  }`}
-                >
-                  {isInjectionEnabled ? 'Configured' : 'Injection Disabled'}
-                </span>
-
-                <label
-                  className="flex items-center gap-1.5 text-xs text-content-dim cursor-pointer ml-2"
-                  onClick={e => e.stopPropagation()}
-                >
-                  <input
-                    type="checkbox"
-                    checked={isInjectionEnabled}
-                    onChange={e => handleToggleInjection(e.target.checked)}
-                    className="rounded accent-emerald-500 cursor-pointer"
-                  />
-                  <span>Enable Env Injection</span>
-                </label>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              className="px-3 py-1 rounded-lg bg-surface-deep border border-surface-border text-xs text-content-muted flex items-center gap-1.5 hover:border-slate-500"
-            >
-              <span>{isGatewayExpanded ? 'Close Config' : 'Open Config'}</span>
-              {isGatewayExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-
-          {isGatewayExpanded && (
-            <div className="mt-4 border-t border-surface-border pt-4 space-y-4 text-xs">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                <div>
-                  <label className="block text-xs font-semibold text-content-muted mb-1">Gateway Provider</label>
-                  <select
-                    value={gatewayProvider}
-                    onChange={e => setGatewayProvider(e.target.value)}
-                    className="w-full bg-surface-deep border border-surface-border rounded-lg px-2.5 py-1.5 text-xs font-mono text-content-main focus:outline-none focus:border-sky-500"
-                  >
-                    <option value="preset_local_proxy">Local Proxy (Port 9230 - Recommended)</option>
-                    <option value="preset_openrouter">OpenRouter Direct</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-content-muted mb-1">
-                    Base URL (ANTHROPIC_BASE_URL)
-                  </label>
-                  <input
-                    type="text"
-                    value={gatewayBaseUrl}
-                    onChange={e => setGatewayBaseUrl(e.target.value)}
-                    className="w-full bg-surface-deep border border-surface-border rounded-lg px-2.5 py-1.5 text-xs font-mono text-content-main focus:outline-none focus:border-sky-500"
-                    placeholder="http://127.0.0.1:9230"
-                  />
-                </div>
-              </div>
-
-              {/* API Keys Failover Pool */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-content-main">OpenRouter API Keys (Failover Pool)</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-accent font-mono font-semibold">
-                      {apiKeys.length} {apiKeys.length === 1 ? 'key' : 'keys'}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-[11px] text-content-dim">Auto-switches on 429</span>
-                    <button
-                      type="button"
-                      onClick={handleAddApiKeyRow}
-                      className="px-2.5 py-1 rounded bg-surface-deep border border-surface-border text-xs text-accent font-semibold hover:border-sky-500 transition"
-                    >
-                      + Add Key
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  {apiKeys.map((key, idx) => {
-                    const isVisible = visibleKeyIndices.has(idx);
-                    return (
-                      <div key={idx} className="flex items-center gap-2">
-                        <span className="w-6 text-center text-xs font-mono text-content-dim font-bold">
-                          #{idx + 1}
-                        </span>
-                        <input
-                          type={isVisible ? 'text' : 'password'}
-                          value={key}
-                          onChange={e => handleApiKeyChange(idx, e.target.value)}
-                          placeholder={`OpenRouter API key #${idx + 1} (sk-or-v1-...)`}
-                          className="flex-1 bg-surface-deep border border-surface-border rounded-lg px-3 py-1.5 text-xs font-mono text-content-main focus:outline-none focus:border-sky-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => toggleKeyReveal(idx)}
-                          className="p-1.5 rounded border border-surface-border bg-surface-deep text-content-dim hover:text-content-main"
-                          title={isVisible ? 'Hide key' : 'Show key'}
-                        >
-                          {isVisible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveApiKeyRow(idx)}
-                          className="p-1.5 rounded border border-rose-500/30 bg-rose-500/10 text-state-danger hover:bg-rose-500/20"
-                          title="Remove key"
-                        >
-                          <img src={actionIcons.trash} alt="" className="h-3.5 w-3.5 object-contain" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="flex items-center justify-between pt-1">
-                  <span className="text-[11px] text-content-dim">
-                    Add as many free keys as you want. When one hits a rate limit, the proxy automatically rotates to the next.
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleSaveClaudeConfig}
-                    disabled={isSavingProvider}
-                    className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition"
-                  >
-                    {isSavingProvider ? 'Saving...' : 'Save Provider'}
-                  </button>
-                </div>
-              </div>
-
-              {/* Utilities Bar */}
-              <div className="flex items-center justify-between flex-wrap gap-2 pt-3 border-t border-surface-border text-xs">
-                <div className="flex items-center gap-3">
-                  <span className="font-mono text-content-dim">{keyHealthStatus}</span>
-                  {freeModelsCount && <span className="text-state-success font-semibold">{freeModelsCount}</span>}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleFetchFreeModels}
-                    disabled={isFetchingModels}
-                    className="px-3 py-1.5 bg-surface-deep border border-surface-border hover:border-slate-500 text-content-main rounded-lg flex items-center gap-1.5 text-xs"
-                  >
-                    <img src={actionIcons.refresh} alt="" className={`h-3.5 w-3.5 object-contain ${isFetchingModels ? 'animate-spin' : ''}`} />
-                    <span>Fetch Free Models</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleClaudeLogout}
-                    className="px-3 py-1.5 bg-rose-500/15 border border-rose-500/30 hover:bg-rose-500/25 text-state-danger rounded-lg flex items-center gap-1.5 text-xs font-medium"
-                    title="Clears stored Anthropic login tokens to ensure OpenRouter token works cleanly"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Claude /logout</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* 2. Project Workspaces & Context Profiles Card (Collapsible) */}
@@ -1084,6 +793,10 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
           </div>
         </div>
       )}
+
+      <ProviderKeyModal open={isGatewayExpanded} onClose={() => setIsGatewayExpanded(false)} />
+
+      {isLocalModelsOpen && <LocalModelsModal onClose={() => setIsLocalModelsOpen(false)} />}
     </div>
   );
 };

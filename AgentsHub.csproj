@@ -53,6 +53,8 @@
     <!-- Qwen drives a WebView2 page the way DeepSeek does, so it is desktop-only too. Its parsing
          lives in Services\Qwen\QwenTools.cs and never in the DeepSeek files. -->
     <Compile Remove="Services\Qwen\**\*.cs" />
+    <!-- Z.ai rides the same WebView2 page, reusing the DeepSeek tool loop and the Qwen parser. -->
+    <Compile Remove="Services\Zai\**\*.cs" />
     <EmbeddedResource Remove="**\*.resx" />
   </ItemGroup>
 

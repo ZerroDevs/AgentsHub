@@ -11,7 +11,7 @@ interface PermissionModeButtonProps {
    * Which engine the copy is written for. The setting is the same profile flag either way, but a
    * DeepSeek turn has no shell policy: it has an approval card for writes and commands.
    */
-  engine?: 'agy' | 'deepseek' | 'qwen' | 'zai';
+  engine?: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'byok';
 }
 
 const PANEL_WIDTH = 296;
@@ -30,6 +30,9 @@ export const PermissionModeButton: React.FC<PermissionModeButtonProps> = ({ prof
   // Z.ai uses the same approval card as DeepSeek, so the copy describes the card rather than a
   // shell policy.
   const isDeepSeek = engine === 'deepseek' || engine === 'zai';
+  // A BYOK turn is the Claude Code CLI in `-p` mode: it cannot ask, so a gated tool is refused and
+  // reported, unless full access is on.
+  const isByok = engine === 'byok';
   const profiles = useProfileStore(state => state.profiles);
   const activeProfileName = useProfileStore(state => state.activeProfileName);
   const setSkipPermissions = useProfileStore(state => state.setSkipPermissions);
@@ -142,9 +145,13 @@ export const PermissionModeButton: React.FC<PermissionModeButtonProps> = ({ prof
                   ? isAllowed
                     ? 'Writes, deletes and commands run without asking.'
                     : 'Writes, deletes and commands ask first. You allow each one from the composer.'
-                  : isAllowed
-                    ? 'Every tool runs without asking, including shell commands.'
-                    : 'Shell commands are blocked. The agent lists the ones it needs and you allow them from the composer.'}
+                  : isByok
+                    ? isAllowed
+                      ? 'Writes, deletes and commands run without asking.'
+                      : 'Actions that need approval are refused outright: this CLI cannot ask mid-turn.'
+                    : isAllowed
+                      ? 'Every tool runs without asking, including shell commands.'
+                      : 'Shell commands are blocked. The agent lists the ones it needs and you allow them from the composer.'}
               </p>
               <p className="mt-1.5 text-[11px] leading-relaxed text-content-dim">
                 {isDeepSeek

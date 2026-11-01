@@ -123,6 +123,31 @@ public class ClaudeGatewayProvider
     public List<string> ApiKeys { get; set; } = [];
     public bool IsPreset { get; set; } = false;
 
+    /// <summary>
+    /// Models this provider listed when the user pressed Fetch models. Kept so the chat picker can be
+    /// filled without a network round trip on every open; empty means "not fetched yet".
+    /// </summary>
+    public List<string> Models { get; set; } = [];
+
+    /// <summary>The model turns run on, or empty to let the CLI pick its own default.</summary>
+    public string SelectedModel { get; set; } = "";
+
+    /// <summary>
+    /// How the endpoint speaks. `anthropic` means Claude Code can talk to it directly; `openai`
+    /// means its `/chat/completions` shape is translated by the built-in local bridge, which is how
+    /// OpenRouter, unorouter and every other OpenAI-style gateway become usable.
+    /// </summary>
+    public string Protocol { get; set; } = "anthropic";
+
+    /// <summary>
+    /// Whether an OpenAI-style endpoint is reached through the built-in translating bridge. On by
+    /// default; off means the endpoint is handed to Claude Code untouched, which only works for a
+    /// gateway that serves the Anthropic Messages API itself.
+    /// </summary>
+    public bool UseBridge { get; set; } = true;
+
+    public bool IsOpenAiCompatible => string.Equals(Protocol, "openai", StringComparison.OrdinalIgnoreCase);
+
     public List<string> GetEffectiveApiKeys()
     {
         var list = new List<string>();
@@ -1007,47 +1032,109 @@ public class AiConfigService
 
         var existingKey = GetOpenRouterApiKey();
 
-        var localProxyPreset = _config.ClaudeGatewayProviders.FirstOrDefault(p => string.Equals(p.Id, "preset_local_proxy", StringComparison.OrdinalIgnoreCase));
-        if (localProxyPreset == null)
+        // The old build shipped a "Local Proxy" entry and pointed the CLI at it. The proxy is now a
+        // translator that whichever provider asks for it, so the entry becomes a real OpenRouter
+        // provider: same keys, same endpoint, no port for a person to reason about.
+        var legacyProxy = _config.ClaudeGatewayProviders.FirstOrDefault(p => string.Equals(p.Id, "preset_local_proxy", StringComparison.OrdinalIgnoreCase));
+        var legacyOpenRouter = _config.ClaudeGatewayProviders.FirstOrDefault(p => string.Equals(p.Id, "preset_openrouter", StringComparison.OrdinalIgnoreCase));
+
+        if (legacyProxy != null)
         {
-            _config.ClaudeGatewayProviders.Insert(0, new ClaudeGatewayProvider
-            {
-                Id = "preset_local_proxy",
-                Name = "Local Proxy (127.0.0.1:9230)",
-                BaseUrl = "http://127.0.0.1:9230",
-                ApiKey = existingKey,
-                IsPreset = true
-            });
+            legacyProxy.Name = "OpenRouter";
+            legacyProxy.BaseUrl = "https://openrouter.ai/api/v1";
+            legacyProxy.Protocol = "openai";
+            legacyProxy.IsPreset = true;
+            legacyProxy.ApiKey = FirstNonEmpty(legacyProxy.ApiKey, legacyOpenRouter?.ApiKey, existingKey);
+            legacyProxy.ApiKeys = [.. legacyProxy.GetEffectiveApiKeys().Concat(legacyOpenRouter?.GetEffectiveApiKeys() ?? []).Distinct()];
+
+            if (legacyOpenRouter != null) _config.ClaudeGatewayProviders.Remove(legacyOpenRouter);
         }
         else
         {
-            localProxyPreset.IsPreset = true;
-            if (string.IsNullOrWhiteSpace(localProxyPreset.BaseUrl)) localProxyPreset.BaseUrl = "http://127.0.0.1:9230";
-            if (string.IsNullOrWhiteSpace(localProxyPreset.ApiKey) && !string.IsNullOrWhiteSpace(existingKey)) localProxyPreset.ApiKey = existingKey;
+            var openRouter = legacyOpenRouter ??= new ClaudeGatewayProvider
+            {
+                Id = "preset_openrouter",
+                Name = "OpenRouter",
+                BaseUrl = "https://openrouter.ai/api/v1",
+                IsPreset = true,
+            };
+
+            if (legacyOpenRouter == openRouter && !_config.ClaudeGatewayProviders.Contains(openRouter))
+            {
+                _config.ClaudeGatewayProviders.Add(openRouter);
+            }
+
+            openRouter.Name = "OpenRouter";
+            openRouter.Protocol = "openai";
+            openRouter.ApiKey = FirstNonEmpty(openRouter.ApiKey, existingKey);
+            openRouter.ApiKeys = [.. openRouter.GetEffectiveApiKeys()];
         }
 
-        var openRouterPreset = _config.ClaudeGatewayProviders.FirstOrDefault(p => string.Equals(p.Id, "preset_openrouter", StringComparison.OrdinalIgnoreCase));
-        if (openRouterPreset == null)
+        // Anything still pointed at the app's own proxy port is a leftover of the old model, when
+        // "Local Proxy" was a provider you had to understand. The bridge is now an implementation
+        // detail of any OpenAI-compatible provider, so those entries are retargeted at OpenRouter and
+        // keep whatever keys they hold.
+        foreach (var stale in _config.ClaudeGatewayProviders.Where(IsOwnProxyEndpoint))
+        {
+            stale.BaseUrl = "https://openrouter.ai/api/v1";
+            stale.Protocol = "openai";
+            stale.UseBridge = true;
+            if (stale.Name.Contains("proxy", StringComparison.OrdinalIgnoreCase)) stale.Name = "OpenRouter";
+        }
+
+        // Retargeting can leave two entries for one endpoint (the old preset plus a hand-made copy).
+        // They are the same provider to a user, so they become one, with the keys of both.
+        var deduped = new List<ClaudeGatewayProvider>();
+        foreach (var candidate in _config.ClaudeGatewayProviders)
+        {
+            var twin = deduped.FirstOrDefault(p =>
+                string.Equals(p.BaseUrl.TrimEnd('/'), candidate.BaseUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
+                && string.Equals(p.Protocol, candidate.Protocol, StringComparison.OrdinalIgnoreCase));
+
+            if (twin == null)
+            {
+                deduped.Add(candidate);
+                continue;
+            }
+
+            twin.ApiKey = FirstNonEmpty(twin.ApiKey, candidate.ApiKey);
+            twin.ApiKeys = [.. twin.GetEffectiveApiKeys().Concat(candidate.GetEffectiveApiKeys()).Distinct()];
+            if (string.IsNullOrWhiteSpace(twin.SelectedModel)) twin.SelectedModel = candidate.SelectedModel;
+            if (twin.Models.Count == 0) twin.Models = [.. candidate.Models ?? []];
+
+            if (string.Equals(_config.ClaudeSelectedGatewayId, candidate.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                _config.ClaudeSelectedGatewayId = twin.Id;
+            }
+        }
+
+        _config.ClaudeGatewayProviders = deduped;
+
+        // A provider still carrying the old name is the same OpenRouter endpoint under a label that
+        // describes plumbing nobody has to configure any more.
+        foreach (var leftover in _config.ClaudeGatewayProviders.Where(p => p.Name.Contains("Local Proxy", StringComparison.OrdinalIgnoreCase)))
+        {
+            leftover.Name = "OpenRouter";
+        }
+
+        // Anthropic itself stays as the direct, no-translation example: it is the one endpoint that
+        // cannot be reached through an OpenAI bridge.
+        if (!_config.ClaudeGatewayProviders.Any(p => string.Equals(p.Id, "preset_anthropic", StringComparison.OrdinalIgnoreCase)))
         {
             _config.ClaudeGatewayProviders.Add(new ClaudeGatewayProvider
             {
-                Id = "preset_openrouter",
-                Name = "OpenRouter Direct",
-                BaseUrl = "https://openrouter.ai/api/v1",
-                ApiKey = existingKey,
-                IsPreset = true
+                Id = "preset_anthropic",
+                Name = "Anthropic",
+                BaseUrl = "https://api.anthropic.com",
+                Protocol = "anthropic",
+                IsPreset = true,
             });
         }
-        else
-        {
-            openRouterPreset.IsPreset = true;
-            if (string.IsNullOrWhiteSpace(openRouterPreset.BaseUrl)) openRouterPreset.BaseUrl = "https://openrouter.ai/api/v1";
-            if (string.IsNullOrWhiteSpace(openRouterPreset.ApiKey) && !string.IsNullOrWhiteSpace(existingKey)) openRouterPreset.ApiKey = existingKey;
-        }
 
-        if (string.IsNullOrWhiteSpace(_config.ClaudeSelectedGatewayId))
+        if (string.IsNullOrWhiteSpace(_config.ClaudeSelectedGatewayId)
+            || !_config.ClaudeGatewayProviders.Any(p => string.Equals(p.Id, _config.ClaudeSelectedGatewayId, StringComparison.OrdinalIgnoreCase)))
         {
-            _config.ClaudeSelectedGatewayId = "preset_local_proxy";
+            _config.ClaudeSelectedGatewayId = _config.ClaudeGatewayProviders.FirstOrDefault()?.Id ?? "preset_openrouter";
         }
 
         SaveConfig(_config);
@@ -1386,7 +1473,7 @@ public class AiConfigService
     {
         lock (_lock)
         {
-            return string.IsNullOrWhiteSpace(_config.ClaudeSelectedGatewayId) ? "preset_local_proxy" : _config.ClaudeSelectedGatewayId;
+            return string.IsNullOrWhiteSpace(_config.ClaudeSelectedGatewayId) ? "preset_openrouter" : _config.ClaudeSelectedGatewayId;
         }
     }
 
@@ -1394,9 +1481,37 @@ public class AiConfigService
     {
         lock (_lock)
         {
-            _config.ClaudeSelectedGatewayId = string.IsNullOrWhiteSpace(id) ? "preset_local_proxy" : id.Trim();
+            _config.ClaudeSelectedGatewayId = string.IsNullOrWhiteSpace(id) ? "preset_openrouter" : id.Trim();
             SaveConfig(_config);
         }
+    }
+
+    public bool SetClaudeGatewayProtocol(string id, string protocol)
+    {
+        lock (_lock)
+        {
+            var provider = _config.ClaudeGatewayProviders?.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
+            if (provider is null) return false;
+
+            provider.Protocol = string.Equals(protocol, "openai", StringComparison.OrdinalIgnoreCase) ? "openai" : "anthropic";
+            SaveConfig(_config);
+            return true;
+        }
+    }
+
+    private static string FirstNonEmpty(params string?[] values) =>
+        values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v)) ?? string.Empty;
+
+    /// <summary>True for a base URL that is this app's own bridge port rather than a real provider.</summary>
+    private static bool IsOwnProxyEndpoint(ClaudeGatewayProvider provider)
+    {
+        if (!Uri.TryCreate(provider.BaseUrl, UriKind.Absolute, out var uri)) return false;
+
+        bool loopback = uri.IsLoopback
+            || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(uri.Host, "127.0.0.1", StringComparison.Ordinal);
+
+        return loopback && uri.Port == ClaudeOpenRouterProxyService.DefaultPort;
     }
 
     public List<ClaudeGatewayProvider> GetClaudeGatewayProviders()
@@ -1415,7 +1530,11 @@ public class AiConfigService
                 BaseUrl = p.BaseUrl,
                 ApiKey = p.ApiKey,
                 ApiKeys = p.GetEffectiveApiKeys(),
-                IsPreset = p.IsPreset
+                IsPreset = p.IsPreset,
+                Models = [.. p.Models ?? []],
+                SelectedModel = p.SelectedModel,
+                Protocol = p.Protocol,
+                UseBridge = p.UseBridge
             })];
         }
     }
@@ -1441,32 +1560,41 @@ public class AiConfigService
                     BaseUrl = found.BaseUrl,
                     ApiKey = found.ApiKey,
                     ApiKeys = found.GetEffectiveApiKeys(),
-                    IsPreset = found.IsPreset
+                    IsPreset = found.IsPreset,
+                    Models = [.. found.Models ?? []],
+                    SelectedModel = found.SelectedModel,
+                    Protocol = found.Protocol,
+                    UseBridge = found.UseBridge
                 };
             }
 
-            var localPreset = providers.FirstOrDefault(p => string.Equals(p.Id, "preset_local_proxy", StringComparison.OrdinalIgnoreCase));
-            if (localPreset != null)
+            var fallback = providers.FirstOrDefault();
+            if (fallback != null)
             {
                 return new ClaudeGatewayProvider
                 {
-                    Id = localPreset.Id,
-                    Name = localPreset.Name,
-                    BaseUrl = localPreset.BaseUrl,
-                    ApiKey = localPreset.ApiKey,
-                    ApiKeys = localPreset.GetEffectiveApiKeys(),
-                    IsPreset = localPreset.IsPreset
+                    Id = fallback.Id,
+                    Name = fallback.Name,
+                    BaseUrl = fallback.BaseUrl,
+                    ApiKey = fallback.ApiKey,
+                    ApiKeys = fallback.GetEffectiveApiKeys(),
+                    IsPreset = fallback.IsPreset,
+                    Models = [.. fallback.Models ?? []],
+                    SelectedModel = fallback.SelectedModel,
+                    Protocol = fallback.Protocol,
+                    UseBridge = fallback.UseBridge
                 };
             }
 
-            return providers.FirstOrDefault() ?? new ClaudeGatewayProvider
+            return new ClaudeGatewayProvider
             {
-                Id = "preset_local_proxy",
-                Name = "Local Proxy (127.0.0.1:9230)",
-                BaseUrl = "http://127.0.0.1:9230",
+                Id = "custom_default",
+                Name = "OpenRouter",
+                BaseUrl = "https://openrouter.ai/api/v1",
+                Protocol = "openai",
                 ApiKey = GetOpenRouterApiKey(),
                 ApiKeys = !string.IsNullOrWhiteSpace(GetOpenRouterApiKey()) ? [GetOpenRouterApiKey()] : [],
-                IsPreset = true
+                IsPreset = false
             };
         }
     }
@@ -1485,6 +1613,10 @@ public class AiConfigService
                 existing.BaseUrl = provider.BaseUrl;
                 existing.ApiKey = provider.ApiKey;
                 existing.ApiKeys = provider.ApiKeys;
+                existing.Models = provider.Models ?? [];
+                existing.SelectedModel = provider.SelectedModel ?? string.Empty;
+                existing.Protocol = string.IsNullOrWhiteSpace(provider.Protocol) ? "anthropic" : provider.Protocol;
+                existing.UseBridge = provider.UseBridge;
             }
             else
             {
@@ -1495,6 +1627,45 @@ public class AiConfigService
         }
     }
 
+    /// <summary>
+    /// Records what a provider's /models answered. The list is stored, not cached in memory, so the
+    /// chat picker works after a restart without asking the network again.
+    /// </summary>
+    public bool SetClaudeGatewayModels(string id, List<string> models)
+    {
+        lock (_lock)
+        {
+            var provider = _config.ClaudeGatewayProviders?.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
+            if (provider is null) return false;
+
+            provider.Models = [.. models.Where(m => !string.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase)];
+
+            // A model that is no longer offered must not stay selected: the next turn would fail on a
+            // name the provider has dropped.
+            if (!string.IsNullOrWhiteSpace(provider.SelectedModel)
+                && !provider.Models.Contains(provider.SelectedModel, StringComparer.OrdinalIgnoreCase))
+            {
+                provider.SelectedModel = string.Empty;
+            }
+
+            SaveConfig(_config);
+            return true;
+        }
+    }
+
+    public bool SetClaudeGatewayModel(string id, string model)
+    {
+        lock (_lock)
+        {
+            var provider = _config.ClaudeGatewayProviders?.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
+            if (provider is null) return false;
+
+            provider.SelectedModel = model.Trim();
+            SaveConfig(_config);
+            return true;
+        }
+    }
+
     public bool DeleteClaudeGatewayProvider(string id)
     {
         lock (_lock)
@@ -1502,7 +1673,14 @@ public class AiConfigService
             if (_config.ClaudeGatewayProviders == null) return false;
 
             var item = _config.ClaudeGatewayProviders.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
-            if (item == null || item.IsPreset)
+            if (item == null)
+            {
+                return false;
+            }
+
+            // Every provider is the user's to delete now, seeds included. The last one stays: a chat
+            // with no provider at all has nothing to report to the picker.
+            if (_config.ClaudeGatewayProviders.Count <= 1)
             {
                 return false;
             }
@@ -1510,7 +1688,7 @@ public class AiConfigService
             _config.ClaudeGatewayProviders.Remove(item);
             if (string.Equals(_config.ClaudeSelectedGatewayId, id, StringComparison.OrdinalIgnoreCase))
             {
-                _config.ClaudeSelectedGatewayId = "preset_local_proxy";
+                _config.ClaudeSelectedGatewayId = _config.ClaudeGatewayProviders[0].Id;
             }
 
             SaveConfig(_config);

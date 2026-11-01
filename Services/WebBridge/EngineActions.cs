@@ -420,6 +420,179 @@ public sealed partial class DashboardWebBridge : IDisposable
         }
     }
 
+    /// <summary>
+    /// One Bring-Your-Own-Key turn through the Claude Code CLI.
+    ///
+    /// The CLI owns the tool loop, the permission model and the thinking stream, so this only
+    /// translates its JSONL into the same events every other engine posts: a Thought node, one
+    /// timeline row per tool call, then the answer.
+    /// </summary>
+    private async Task DispatchByokAsync(
+        string sessionId,
+        string prompt,
+        string? conversationId,
+        string? cwd,
+        bool skipPermissions,
+        string? model)
+    {
+        static string Now() => DateTime.UtcNow.ToString("O");
+
+        var provider = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
+
+        PostEventToUi("session_status", new { sessionId, state = "running", timestamp = Now() });
+
+        // Opened with no text and closed on every path out, so a turn that dies still settles the row.
+        PostEventToUi("thinking", new
+        {
+            sessionId,
+            state = "running",
+            text = string.Empty,
+            timestamp = Now(),
+        });
+
+        var turnStarted = DateTime.UtcNow;
+
+        var progress = new Progress<string>(text =>
+            PostEventToUi("chat_token", new { sessionId, text, timestamp = Now() }));
+
+        void OnThinking(string text)
+        {
+            PostEventToUi("thinking", new
+            {
+                sessionId,
+                state = "running",
+                text,
+                thinkingTokens = 0,
+                timestamp = Now(),
+            });
+        }
+
+        void OnTool(Services.Byok.ByokToolEvent evt)
+        {
+            if (evt.IsStart)
+            {
+                var (label, kind) = DescribeByokTool(evt.Tool);
+
+                PostEventToUi("tool_start", new
+                {
+                    sessionId,
+                    callId = evt.CallId,
+                    tool = label,
+                    @params = new Dictionary<string, object?>
+                    {
+                        ["toolKind"] = kind,
+                        ["path"] = null,
+                        ["action"] = evt.Tool,
+                        ["commandLine"] = kind == "command" ? evt.Detail : null,
+                        ["detail"] = evt.Detail,
+                    },
+                    timestamp = Now(),
+                });
+            }
+            else
+            {
+                PostEventToUi("tool_output", new
+                {
+                    sessionId,
+                    callId = evt.CallId,
+                    tool = string.Empty,
+                    success = evt.Success,
+                    result = evt.Output,
+                    error = (string?)null,
+                    durationMs = 0,
+                    timestamp = Now(),
+                });
+            }
+        }
+
+        void CloseThinking() => PostEventToUi("thinking", new
+        {
+            sessionId,
+            state = "done",
+            durationSeconds = Math.Round((DateTime.UtcNow - turnStarted).TotalSeconds, 1),
+            thinkingTokens = 0,
+            timestamp = Now(),
+        });
+
+        try
+        {
+            var turn = await Services.Byok.ByokEngine.Instance
+                .SendAsync(
+                    prompt,
+                    string.IsNullOrWhiteSpace(cwd)
+                        ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                        : cwd,
+                    provider,
+                    conversationId,
+                    model,
+                    skipPermissions,
+                    progress,
+                    OnThinking,
+                    OnTool)
+                .ConfigureAwait(false);
+
+            CloseThinking();
+
+            // The CLI's own session id continues the conversation on the next turn.
+            if (!string.IsNullOrWhiteSpace(turn.SessionId) && !string.Equals(turn.SessionId, conversationId, StringComparison.Ordinal))
+            {
+                PostEventToUi("conversation_started", new
+                {
+                    sessionId,
+                    conversationId = turn.SessionId,
+                    timestamp = Now(),
+                });
+            }
+
+            PostEventToUi("chat_final", new { sessionId, text = turn.Answer, timestamp = Now() });
+            PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
+        }
+        catch (Exception ex)
+        {
+            CloseThinking();
+
+            // A Stop is not a failure: killing the child looks like a non-zero exit, and painting
+            // that red after the user asked for it would be a lie about what happened.
+            if (Services.Byok.ByokEngine.Instance.Stopped)
+            {
+                PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
+                return;
+            }
+
+            PostEventToUi("chat_final", new
+            {
+                sessionId,
+                text = $"{provider.Name} could not answer: {ex.Message}",
+                timestamp = Now(),
+            });
+
+            PostEventToUi("session_status", new
+            {
+                sessionId,
+                state = "error",
+                error = ex.Message,
+                timestamp = Now(),
+            });
+        }
+    }
+
+    /// <summary>
+    /// Claude Code names its own tools (Bash, Read, Write, Edit, Grep, WebFetch). The timeline reads
+    /// kinds, not names, so this is the only translation it needs.
+    /// </summary>
+    private static (string Label, string Kind) DescribeByokTool(string tool) => tool switch
+    {
+        "Bash" or "BashOutput" or "KillShell" => ("Ran", "command"),
+        "Read" or "NotebookRead" => ("Read", "read"),
+        "Write" => ("Wrote", "write"),
+        "Edit" or "MultiEdit" or "NotebookEdit" => ("Edited", "write"),
+        "Glob" or "Grep" or "LS" => ("Searched", "search"),
+        "WebFetch" or "WebSearch" => ("Fetched", "other"),
+        "Task" or "Agent" => ("Delegated", "other"),
+        "TodoWrite" => ("Planned", "other"),
+        _ => (tool, "other"),
+    };
+
     private async Task HandleDeepseekStatusAsync(string? requestId)
     {
         bool signedIn = await Services.DeepSeek.DeepSeekEngine.Instance.ProbeSignedInAsync().ConfigureAwait(false);

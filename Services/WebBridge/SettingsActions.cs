@@ -365,8 +365,13 @@ public sealed partial class DashboardWebBridge : IDisposable
                     baseUrl = p.BaseUrl,
                     apiKey = p.ApiKey,
                     apiKeys = p.GetEffectiveApiKeys(),
-                    isPreset = p.IsPreset
+                    isPreset = p.IsPreset,
+                    protocol = p.Protocol,
+                    useBridge = p.UseBridge,
+                    models = p.Models ?? [],
+                    selectedModel = p.SelectedModel
                 }),
+                activeId = cfg.GetClaudeSelectedGatewayId(),
                 activeProvider = new
                 {
                     id = active.Id,
@@ -374,7 +379,11 @@ public sealed partial class DashboardWebBridge : IDisposable
                     baseUrl = active.BaseUrl,
                     apiKey = active.ApiKey,
                     apiKeys = active.GetEffectiveApiKeys(),
-                    isPreset = active.IsPreset
+                    isPreset = active.IsPreset,
+                    protocol = active.Protocol,
+                    useBridge = active.UseBridge,
+                    models = active.Models ?? [],
+                    selectedModel = active.SelectedModel
                 }
             });
         }
@@ -408,16 +417,60 @@ public sealed partial class DashboardWebBridge : IDisposable
 
         string primaryKey = apiKeysList.FirstOrDefault() ?? apiKey;
 
+        // Saving a draft that was never added creates it. New providers are the user's own, so no
+        // preset id is invented for them.
+        string provIdResolved = string.IsNullOrWhiteSpace(provId) ? "custom_" + Guid.NewGuid().ToString("N")[..8] : provId;
+
+        // Saving the base URL or a key must not erase the model list the last Fetch produced: the
+        // fields live on the same record, and the card saves more often than it fetches.
+        var stored = AiConfigService.Instance.GetClaudeGatewayProviders()
+            .FirstOrDefault(p => string.Equals(p.Id, provIdResolved, StringComparison.OrdinalIgnoreCase));
+
+        string requestedModel = data.TryGetProperty("selectedModel", out var smEl) ? (smEl.GetString()?.Trim() ?? "") : string.Empty;
+        string protocol = data.TryGetProperty("protocol", out var prEl) ? (prEl.GetString() ?? "") : string.Empty;
+        bool? useBridge = data.TryGetProperty("useBridge", out var ubEl) && ubEl.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? ubEl.GetBoolean()
+            : null;
+
+        // A fetch made against an unsaved draft has nowhere to live yet, so the list travels with the
+        // save instead of being written first and read back.
+        var requestedModels = new List<string>();
+        if (data.TryGetProperty("models", out var modelsEl) && modelsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in modelsEl.EnumerateArray())
+            {
+                string? model = item.GetString()?.Trim();
+                if (!string.IsNullOrWhiteSpace(model) && !requestedModels.Contains(model))
+                {
+                    requestedModels.Add(model);
+                }
+            }
+        }
+
         var provider = new ClaudeGatewayProvider
         {
-            Id = string.IsNullOrWhiteSpace(provId) ? "preset_local_proxy" : provId,
+            Id = provIdResolved,
             Name = name,
             BaseUrl = baseUrl,
             ApiKey = primaryKey,
             ApiKeys = apiKeysList,
-            IsPreset = provId.StartsWith("preset_", StringComparison.OrdinalIgnoreCase)
+            IsPreset = provId.StartsWith("preset_", StringComparison.OrdinalIgnoreCase),
+            Models = requestedModels.Count > 0 ? requestedModels : stored?.Models ?? [],
+            SelectedModel = requestedModel.Length > 0 ? requestedModel : stored?.SelectedModel ?? string.Empty,
+            Protocol = protocol.Length > 0
+                ? protocol
+                : stored?.Protocol ?? "anthropic",
+            UseBridge = useBridge ?? stored?.UseBridge ?? true
         };
         AiConfigService.Instance.SaveClaudeGatewayProvider(provider);
+
+        // A key the user just typed belongs to the provider they are looking at. Without this the
+        // active provider could still be another one, and a BYOK chat would run on the wrong key.
+        bool makeActive = data.TryGetProperty("makeActive", out var maEl) && maEl.ValueKind == JsonValueKind.True;
+        if (makeActive)
+        {
+            AiConfigService.Instance.SetClaudeSelectedGatewayId(provider.Id);
+        }
 
         if (string.Equals(AiConfigService.Instance.GetClaudeSelectedGatewayId(), provider.Id, StringComparison.OrdinalIgnoreCase))
         {
@@ -440,7 +493,12 @@ public sealed partial class DashboardWebBridge : IDisposable
                 baseUrl = provider.BaseUrl,
                 apiKey = provider.ApiKey,
                 apiKeys = provider.GetEffectiveApiKeys(),
-                isPreset = provider.IsPreset
+                isPreset = provider.IsPreset,
+                models = AiConfigService.Instance.GetClaudeGatewayProviders()
+                    .FirstOrDefault(p => string.Equals(p.Id, provider.Id, StringComparison.OrdinalIgnoreCase))?.Models ?? [],
+                selectedModel = provider.SelectedModel,
+                protocol = provider.Protocol,
+                useBridge = provider.UseBridge
             }
         });
     }
@@ -449,16 +507,19 @@ public sealed partial class DashboardWebBridge : IDisposable
     {
         {
             string name = data.TryGetProperty("name", out var nEl) ? (nEl.GetString()?.Trim() ?? "Custom Provider") : "Custom Provider";
-            string baseUrl = data.TryGetProperty("baseUrl", out var bEl) ? (bEl.GetString()?.Trim() ?? "https://openrouter.ai/api/v1") : "https://openrouter.ai/api/v1";
+            string baseUrl = data.TryGetProperty("baseUrl", out var bEl) ? (bEl.GetString()?.Trim() ?? "") : "";
             string apiKey = data.TryGetProperty("apiKey", out var kEl) ? (kEl.GetString()?.Trim() ?? "") : "";
+            string protocol = data.TryGetProperty("protocol", out var prEl) ? (prEl.GetString() ?? "") : "";
 
             var newProv = new ClaudeGatewayProvider
             {
                 Id = "custom_" + Guid.NewGuid().ToString("N")[..8],
                 Name = string.IsNullOrWhiteSpace(name) ? "Custom Gateway" : name,
-                BaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? "https://openrouter.ai/api/v1" : baseUrl,
+                BaseUrl = baseUrl,
                 ApiKey = apiKey,
-                IsPreset = false
+                ApiKeys = string.IsNullOrWhiteSpace(apiKey) ? [] : [apiKey],
+                IsPreset = false,
+                Protocol = protocol.Length > 0 ? protocol : "openai"
             };
             AiConfigService.Instance.SaveClaudeGatewayProvider(newProv);
             AiConfigService.Instance.SetClaudeSelectedGatewayId(newProv.Id);
@@ -471,7 +532,11 @@ public sealed partial class DashboardWebBridge : IDisposable
                     name = newProv.Name,
                     baseUrl = newProv.BaseUrl,
                     apiKey = newProv.ApiKey,
-                    isPreset = newProv.IsPreset
+                    isPreset = newProv.IsPreset,
+                    protocol = newProv.Protocol,
+                    useBridge = newProv.UseBridge,
+                    models = Array.Empty<string>(),
+                    selectedModel = string.Empty
                 }
             });
         }
@@ -525,10 +590,6 @@ public sealed partial class DashboardWebBridge : IDisposable
                 if (AiConfigService.Instance.GetClaudeInjectionEnabled())
                 {
                     CliManagerService.SyncClaudeGatewaySettingsJson(act.ApiKey, AiConfigService.Instance.GetClaudeSelectedModel(), act.BaseUrl);
-                    if (string.Equals(act.Id, "preset_local_proxy", StringComparison.OrdinalIgnoreCase) || act.BaseUrl.Contains(":9230"))
-                    {
-                        ClaudeOpenRouterProxyService.Instance.Start(9230);
-                    }
                 }
             }
             var activeAct = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
@@ -541,10 +602,87 @@ public sealed partial class DashboardWebBridge : IDisposable
                     name = activeAct.Name,
                     baseUrl = activeAct.BaseUrl,
                     apiKey = activeAct.ApiKey,
-                    isPreset = activeAct.IsPreset
+                    isPreset = activeAct.IsPreset,
+                    protocol = activeAct.Protocol,
+                    useBridge = activeAct.UseBridge
                 }
             });
         }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Asks the provider's own /models endpoint what a pasted key can reach, and stores the answer on
+    /// the provider so the chat picker can fill itself without touching the network again.
+    /// </summary>
+    private async Task HandleClaudeGatewayFetchModelsAsync(JsonElement data, string? requestId)
+    {
+        string provId = data.TryGetProperty("providerId", out var pIdEl) ? (pIdEl.GetString() ?? "") : "";
+        string baseUrl = data.TryGetProperty("baseUrl", out var bEl) ? (bEl.GetString()?.Trim() ?? "") : "";
+        string apiKey = data.TryGetProperty("apiKey", out var kEl) ? (kEl.GetString()?.Trim() ?? "") : "";
+
+        var stored = AiConfigService.Instance.GetClaudeGatewayProviders()
+            .FirstOrDefault(p => string.Equals(p.Id, provId, StringComparison.OrdinalIgnoreCase));
+
+        if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = stored?.BaseUrl ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(apiKey)) apiKey = stored?.GetEffectiveApiKeys().FirstOrDefault() ?? string.Empty;
+
+        // The endpoint's shape decides which auth header the request carries, and sending the wrong
+        // one silently shrinks some gateways' answers.
+        string protocol = data.TryGetProperty("protocol", out var prEl) ? (prEl.GetString() ?? "") : string.Empty;
+        if (string.IsNullOrWhiteSpace(protocol)) protocol = stored?.Protocol ?? "openai";
+
+        try
+        {
+            var models = await Services.Byok.ByokModels.FetchAsync(baseUrl, apiKey, protocol).ConfigureAwait(false);
+
+            // Only a stored provider can keep the list; an unsaved one still gets its models back so
+            // the field can show them before the user presses Save.
+            bool saved = !string.IsNullOrWhiteSpace(provId) && AiConfigService.Instance.SetClaudeGatewayModels(provId, models);
+
+            SendResponse(requestId, true, new { models, count = models.Count, saved, providerId = provId });
+        }
+        catch (Exception ex)
+        {
+            SendResponse(requestId, false, ex.Message);
+        }
+    }
+
+    /// <summary>Picks the model a provider answers with. Empty means "let the CLI choose".</summary>
+    private Task HandleClaudeGatewaySetModelAsync(JsonElement data, string? requestId)
+    {
+        string provId = data.TryGetProperty("providerId", out var pIdEl) ? (pIdEl.GetString() ?? "") : "";
+        string model = data.TryGetProperty("model", out var mEl) ? (mEl.GetString()?.Trim() ?? "") : "";
+
+        if (string.IsNullOrWhiteSpace(provId))
+        {
+            SendResponse(requestId, false, "providerId is required");
+            return Task.CompletedTask;
+        }
+
+        bool ok = AiConfigService.Instance.SetClaudeGatewayModel(provId, model);
+        SendResponse(requestId, ok, new { success = ok, providerId = provId, selectedModel = model });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// What the chat picker reads: the provider a BYOK session will use, its model list and its
+    /// current choice. Nothing is fetched here, so opening the picker never waits on the network.
+    /// </summary>
+    private Task HandleByokModelsAsync(string? requestId)
+    {
+        var active = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
+
+        SendResponse(requestId, true, new
+        {
+            providerId = active.Id,
+            providerName = active.Name,
+            baseUrl = active.BaseUrl,
+            models = active.Models ?? [],
+            selectedModel = active.SelectedModel,
+            hasKey = !string.IsNullOrWhiteSpace(active.GetEffectiveApiKeys().FirstOrDefault() ?? active.ApiKey),
+        });
 
         return Task.CompletedTask;
     }
@@ -1618,14 +1756,18 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             // winget and the PowerShell scripts are Windows-only paths. Elsewhere the same command
             // runs through the POSIX shell, where npm, brew and the distro package manager live.
+            string command = !isWindows && definition.UnixInstallCommand.Length > 0
+                ? definition.UnixInstallCommand
+                : definition.InstallCommand;
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = !isWindows ? "/bin/bash" : useWinget ? "cmd.exe" : "powershell.exe",
                 Arguments = !isWindows
-                    ? $"-lc \"{definition.InstallCommand}\""
+                    ? $"-lc \"{command}\""
                     : useWinget
-                        ? $"/c {definition.InstallCommand}"
-                        : $"-NoProfile -ExecutionPolicy Bypass -Command \"{definition.InstallCommand}\"",
+                        ? $"/c {command}"
+                        : $"-NoProfile -ExecutionPolicy Bypass -Command \"{command}\"",
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -1712,5 +1854,214 @@ public sealed partial class DashboardWebBridge : IDisposable
             dependency = status == null ? null : ToDependencyDto(status)
         });
     }
+
+    // ---- Local models: llama.cpp ----
+
+    private Task HandleLlamaCppStatusAsync(string? requestId)
+    {
+        SendResponse(requestId, true, ToLlamaCppDto(Services.LlamaCpp.LlamaCppService.Instance.Status()));
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleLlamaCppStartAsync(string? requestId)
+    {
+        var status = await Services.LlamaCpp.LlamaCppService.Instance.StartAsync().ConfigureAwait(false);
+        SendResponse(requestId, true, ToLlamaCppDto(status));
+    }
+
+    private Task HandleLlamaCppStopAsync(string? requestId)
+    {
+        Services.LlamaCpp.LlamaCppService.Instance.Stop();
+        SendResponse(requestId, true, ToLlamaCppDto(Services.LlamaCpp.LlamaCppService.Instance.Status()));
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Starts the server if it is not up, then makes its provider the one new chats use. Both in one
+    /// action so the button lands someone in a session that can answer instead of one that fails on
+    /// the first send.
+    /// </summary>
+    private async Task HandleLlamaCppUseAsync(string? requestId)
+    {
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        var status = await service.StartAsync().ConfigureAwait(false);
+        var provider = service.EnsureProvider();
+
+        SendResponse(requestId, true, new
+        {
+            success = status.Running,
+            status = ToLlamaCppDto(status),
+            provider = new
+            {
+                id = provider.Id,
+                name = provider.Name,
+                baseUrl = provider.BaseUrl,
+                isPreset = provider.IsPreset,
+                protocol = provider.Protocol,
+                useBridge = provider.UseBridge,
+                models = provider.Models,
+                selectedModel = provider.SelectedModel
+            }
+        });
+    }
+
+    /// <summary>
+    /// Point the app at a llama-server (or llama) the person already built or installed elsewhere.
+    /// This machine's file picker is the only reliable way to find a tree under an arbitrary path.
+    /// </summary>
+    private Task HandleLlamaCppBrowseAsync(string? requestId)
+    {
+        string? selected = null;
+#if WINDOWS
+        if (_mainForm is Form f && f.IsHandleCreated && !f.IsDisposed)
+        {
+            f.Invoke(() =>
+            {
+                var localPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs");
+                var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var llamaTree = Path.Combine(profile, "llama.cpp");
+
+                using var ofd = new OpenFileDialog
+                {
+                    Title = "Select llama-server or llama",
+                    Filter = "llama.cpp server (llama-server*;llama*)|llama-server*;llama*|All files (*.*)|*.*",
+                    InitialDirectory = Directory.Exists(llamaTree)
+                        ? llamaTree
+                        : Directory.Exists(localPrograms) ? localPrograms : profile
+                };
+
+                if (ofd.ShowDialog(f) == DialogResult.OK) selected = ofd.FileName;
+            });
+        }
+#endif
+
+        if (!string.IsNullOrWhiteSpace(selected))
+        {
+            Services.LlamaCpp.LlamaCppService.Instance.SetCustomPath(selected);
+        }
+
+        SendResponse(requestId, !string.IsNullOrWhiteSpace(selected), new
+        {
+            success = !string.IsNullOrWhiteSpace(selected),
+            path = selected ?? string.Empty,
+            status = ToLlamaCppDto(Services.LlamaCpp.LlamaCppService.Instance.Status())
+        });
+
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleLlamaCppCheckUpdateAsync(string? requestId)
+    {
+        var update = await Services.LlamaCpp.LlamaCppService.Instance.CheckUpdateAsync().ConfigureAwait(false);
+
+        SendResponse(requestId, true, new
+        {
+            ok = update.Ok,
+            current = update.Current,
+            latest = update.Latest,
+            updateAvailable = update.UpdateAvailable,
+            url = update.Url,
+            message = update.Message
+        });
+    }
+
+    /// <summary>
+    /// Updates llama.cpp from inside the app with the vendor's own installer.
+    ///
+    /// A binary the person placed by hand is never overwritten — guessing at someone's build flags
+    /// is how a working GPU setup disappears. Instead the installer puts the official build in its
+    /// usual place, and the server switches to it, because otherwise the card would sit on an update
+    /// it cannot apply and offer the same button forever.
+    /// </summary>
+    private async Task HandleLlamaCppUpdateAsync(string? requestId)
+    {
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        var before = service.Status();
+
+        var update = await service.CheckUpdateAsync().ConfigureAwait(false);
+
+        if (!update.Ok)
+        {
+            SendResponse(requestId, false, new { updated = false, message = update.Message });
+            return;
+        }
+
+        if (!update.UpdateAvailable)
+        {
+            SendResponse(requestId, true, new { updated = false, message = update.Message, status = ToLlamaCppDto(before) });
+            return;
+        }
+
+        var definition = DependencyCheckerService.Find("llamacpp");
+        if (definition == null)
+        {
+            SendResponse(requestId, false, "The llama.cpp installer is not in the catalog.");
+            return;
+        }
+
+        // The installer rewrites files a running server holds open, so the server goes down first
+        // and comes back only if it was up.
+        if (before.Running) service.Stop();
+
+        await RunDependencyInstallAsync(definition).ConfigureAwait(false);
+
+        bool switched = false;
+
+        if (!IsManagedLlamaCppInstall(before.Path))
+        {
+            // Step aside from the hand-placed file only if the fresh install is actually a different
+            // build; restoring it otherwise keeps a pick the person made on purpose.
+            string handPlaced = before.Path;
+            service.SetCustomPath(string.Empty);
+
+            var detected = service.Status();
+            bool landed = detected.Installed
+                && !string.Equals(detected.Version, before.Version, StringComparison.OrdinalIgnoreCase);
+
+            if (landed) switched = true;
+            else service.SetCustomPath(handPlaced);
+        }
+
+        var after = service.Status();
+        if (before.Running && after.Installed) after = await service.StartAsync().ConfigureAwait(false);
+
+        bool changed = after.Installed
+            && !string.Equals(after.Version, before.Version, StringComparison.OrdinalIgnoreCase);
+
+        string message = switched
+            ? $"Installed {update.Latest}. The server now runs {after.Path}."
+            : changed
+                ? $"Updated to {after.Version}."
+                : $"The installer finished, but the server still reports {before.Version}. Press Check updates to re-check.";
+
+        SendResponse(requestId, true, new
+        {
+            updated = true,
+            switched,
+            message,
+            url = update.Url,
+            status = ToLlamaCppDto(after)
+        });
+    }
+
+    /// <summary>
+    /// Whether this binary belongs to the llama.app installer, the only channel that can replace it
+    /// in place. A PATH hit from scoop, a distro package or a hand build is left alone.
+    /// </summary>
+    private static bool IsManagedLlamaCppInstall(string path) =>
+        path.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase)
+        || path.Contains("llama-app", StringComparison.OrdinalIgnoreCase);
+
+    private static object ToLlamaCppDto(Services.LlamaCpp.LlamaCppStatus status) => new
+    {
+        installed = status.Installed,
+        path = status.Path,
+        version = status.Version,
+        running = status.Running,
+        port = status.Port,
+        endpoint = status.Endpoint,
+        message = status.Message,
+        usesCustomPath = status.UsesCustomPath
+    };
 
 }
