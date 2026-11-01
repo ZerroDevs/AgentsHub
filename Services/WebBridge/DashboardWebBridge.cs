@@ -609,6 +609,34 @@ public sealed partial class DashboardWebBridge : IDisposable
                 await HandleQwenSendAsync(data, requestId).ConfigureAwait(false);
                 break;
 
+            case "zai_status":
+                await HandleZaiStatusAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "zai_login":
+                await HandleZaiLoginAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "zai_open":
+                await HandleZaiOpenAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "zai_models":
+                await HandleZaiModelsAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "zai_model":
+                await HandleZaiModelAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "zai_stop":
+                await HandleZaiStopAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "zai_cancel":
+                await HandleZaiCancelAsync(data, requestId).ConfigureAwait(false);
+                break;
+
 #endif
 #endif
 #if DEEPSEEK_UI
@@ -1753,6 +1781,9 @@ public sealed partial class DashboardWebBridge : IDisposable
 
     /// <summary>Live DeepSeek runs, so the stop button can cancel one by session id.</summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _deepSeekRuns = new();
+
+    /// <summary>Live Z.ai runs. A Z.ai turn owns the page for its whole tool loop.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _zaiRuns = new();
 
 #endif
 

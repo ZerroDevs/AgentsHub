@@ -187,10 +187,43 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
   const isHostEngine =
     isDeepSeek ||
     activeSession?.engine === 'qwen' ||
+    activeSession?.engine === 'zai' ||
     activeSession?.engine === 'vyce' ||
     activeSession?.engine === 'opencode';
   const isQwen = activeSession?.engine === 'qwen';
+  const isZai = activeSession?.engine === 'zai';
+
+  /**
+   * Whether Z.ai has an account behind it. Guest use is supported, so this only decides whether the
+   * window offers a sign-in or says thank you.
+   */
+  const [zaiSignedIn, setZaiSignedIn] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!isZai) return;
+
+    let alive = true;
+    void webviewBridge
+      .invoke('zai_status')
+      .then((res: any) => {
+        if (alive) setZaiSignedIn(Boolean(res?.signedIn));
+      })
+      .catch(() => {
+        if (alive) setZaiSignedIn(null);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [isZai]);
   const isOpenCode = activeSession?.engine === 'opencode';
+
+  /** A turn from a host engine never starts a runner, so gating one on the runner is wrong. */
+  const blockedNotice =
+    isHostEngine || !isRunnerStopped || autoRunDefaultProfile
+      ? null
+      : `Runner ${profileLabel(runnerName)} is stopped. Start it to send a message.`;
+
   const [qwenMenuOpen, setQwenMenuOpen] = useState(false);
 
   /**
@@ -543,6 +576,34 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
             </div>
           ) : null}
 
+          {/* Z.ai has no runner process, so its own chip stands where the runner dropdown does. */}
+          {isZai ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void webviewBridge.invoke('zai_open').catch(() => {})}
+                className="flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] text-accent transition-colors hover:bg-sky-500/15"
+                title="Open the Z.ai window"
+              >
+                <Sparkles className="h-3 w-3" />
+                Z.ai
+              </button>
+
+              {/* The guest allowance runs out mid-chat, so the way up to an account is always one
+                  click away rather than a warning discovered at the send button. */}
+              {zaiSignedIn === false ? (
+                <button
+                  type="button"
+                  onClick={() => void webviewBridge.invoke('zai_login').catch(() => {})}
+                  className="rounded-lg border border-surface-border px-2 py-1 text-[10.5px] text-content-muted transition-colors hover:border-sky-500/50 hover:text-content-main"
+                  title="Sign in to Z.ai for GLM-5.3, GLM-5.2 and a larger allowance. Guest use works without it."
+                >
+                  Sign in for more
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+
           {/* Runner Dropdown with Multi-Profile Popover */}
           <div className={isHostEngine ? 'hidden' : 'relative'}>
             <button
@@ -702,7 +763,7 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
       </div>
 
       {/* 2. Multi-Session Agent Tabs Bar */}
-      <div className="h-9 border-b border-surface-border bg-surface-deep/95 px-4 flex items-center justify-between text-xs overflow-x-auto select-none z-10 flex-shrink-0">
+      <div className="h-9 px-4 flex items-center justify-between text-xs overflow-x-auto select-none z-10 flex-shrink-0">
         <div className="flex items-center space-x-1 overflow-x-auto scrollbar-none flex-1 py-1">
           {openTabs.map(tab => {
             const isActive = tab.id === activeSessionId;
@@ -768,6 +829,8 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
               messages={activeSession.messages}
               activeExecutionCardId={activeSession.activeExecutionCardId}
               isGenerating={isExecuting}
+              blockedNotice={blockedNotice}
+              onStartRunner={() => void startProfile(runnerName)}
             />
           ) : (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 text-content-dim">
@@ -819,12 +882,7 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
             <ChatInput
               sessionId={activeSession.id}
               profileName={activeSession?.profile || activeProfileName}
-            blockedNotice={
-              // A DeepSeek turn never starts a runner, so gating it on one is wrong.
-              isHostEngine || !isRunnerStopped || autoRunDefaultProfile
-                ? null
-                : `Runner ${profileLabel(runnerName)} is stopped. Start it to send a message.`
-            }
+            blockedNotice={blockedNotice}
               onStartRunner={() => void startProfile(runnerName)}
               onSendMessage={handleSendMessage}
               onStop={handleStopGenerating}

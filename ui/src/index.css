@@ -40,7 +40,8 @@
 
   --text-main: #f1f5f9;
   --text-muted: #94a3b8;
-  --text-dim: #64748b;
+  /* 5.8:1 on the sidebar, 6.2:1 on the app background. Matches what useThemeStore writes. */
+  --text-dim: #8494a8;
   --text-inverse: #ffffff;
 
   /* Translucent interaction layers, so hover states stay visible on both themes. */
@@ -75,7 +76,7 @@
   --syn-keyword: #7dd3fc;
   --syn-string: #86efac;
   --syn-number: #fdba74;
-  --syn-comment: #64748b;
+  --syn-comment: #8494a8;
   --syn-function: #fde68a;
   --syn-type: #a5f3fc;
   --syn-property: #93c5fd;
@@ -112,10 +113,10 @@
   --border-focus: #0284c7;
   --border-hover: #0284c7;
 
-  /* 15.9:1, 7.5:1 and 4.8:1 against #FFFFFF — at or above WCAG AA for body text. */
+  /* 15.9:1, 7.5:1 and 5.8:1 against #FFFFFF — at or above WCAG AA for body text. */
   --text-main: #0f172a;
   --text-muted: #475569;
-  --text-dim: #64748b;
+  --text-dim: #5a6678;
   --text-inverse: #ffffff;
 
   --overlay-hover: rgba(15, 23, 42, 0.04);

@@ -7,11 +7,11 @@ import {
   Users,
   Cpu,
   Sliders,
-  Cat,
   PanelLeftClose,
 } from 'lucide-react';
 import { ActiveView } from '../../types/agent';
 import { useSidecarStore } from '../../store/useSidecarStore';
+import { brandLogo } from '../../lib/toolIcons';
 
 export const PrimaryRail: React.FC = () => {
   const { activeView, setActiveView, toggleRail } = useSidecarStore();
@@ -38,13 +38,15 @@ export const PrimaryRail: React.FC = () => {
     >
       {/* Top Group: Brand Badge & Nav Items */}
       <div className="flex flex-col items-center space-y-3 w-full">
-        {/* Brand Badge */}
+        {/* The app's own mark, drawn by its own artwork. A gradient tile with a generic cat
+            glyph was the loudest tell that this is not a designed product. */}
         <button
           onClick={() => setActiveView('chat')}
-          className="w-9 h-9 rounded-lg bg-gradient-to-br from-sky-500 to-blue-700 flex items-center justify-center text-white shadow-lg shadow-sky-500/20 cursor-pointer mb-1 transition hover:brightness-110 active:scale-95"
-          title="Agents Hub v2.0 - Chat IDE"
+          className="mb-1 w-9 h-9 rounded-lg transition hover:brightness-110 active:scale-95"
+          title="Agents Hub"
+          aria-label="Agents Hub"
         >
-          <Cat className="w-5 h-5" />
+          <img src={brandLogo} alt="" className="w-full h-full rounded-lg object-contain" />
         </button>
 
         {/* Primary View Switcher Buttons */}
@@ -63,9 +65,9 @@ export const PrimaryRail: React.FC = () => {
                   setTooltip({ label: item.label, top: event.currentTarget.getBoundingClientRect().top })
                 }
                 onBlur={() => setTooltip(null)}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center transition relative group ${
+                className={`w-10 h-10 rounded-xl flex items-center justify-center transition relative ${
                   isActive
-                    ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30 shadow-sm'
+                    ? 'bg-accent-soft text-accent border border-sky-500/30'
                     : 'text-content-muted hover:text-content-main hover:bg-surface-card'
                 }`}
                 title={item.label}

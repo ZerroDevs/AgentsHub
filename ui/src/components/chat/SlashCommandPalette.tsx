@@ -64,7 +64,7 @@ export const SlashCommandPalette: React.FC<SlashCommandPaletteProps> = ({
     >
       <div className="flex items-center justify-between border-b border-surface-border/70 px-3 py-1.5">
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-content-dim">
+          <span className="text-[10.5px] font-medium text-content-dim">
             Commands
           </span>
           {engineLabel ? (

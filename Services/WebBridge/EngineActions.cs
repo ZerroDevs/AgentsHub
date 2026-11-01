@@ -104,6 +104,322 @@ public sealed partial class DashboardWebBridge : IDisposable
 #endif
 #endif
 #if DEEPSEEK_UI
+    // ------------------------------------------------------------------ Z.ai (GLM)
+
+    private async Task HandleZaiStatusAsync(string? requestId)
+    {
+        var status = await Services.Zai.ZaiEngine.Instance.ProbeAsync().ConfigureAwait(false);
+        SendResponse(requestId, true, new
+        {
+            // Anonymous use is supported on purpose: the site hands every visitor a guest token.
+            // `signedIn` only decides whether the advanced models are unlocked.
+            signedIn = status == Services.Zai.ZaiStatus.SignedIn,
+            guest = status == Services.Zai.ZaiStatus.Guest,
+            status = status.ToString().ToLowerInvariant(),
+        });
+    }
+
+    private async Task HandleZaiLoginAsync(string? requestId)
+    {
+        await Services.Zai.ZaiEngine.Instance.ShowLoginWindowAsync().ConfigureAwait(false);
+        SendResponse(requestId, true, new { opened = true });
+    }
+
+    private async Task HandleZaiOpenAsync(string? requestId)
+    {
+        await Services.Zai.ZaiEngine.Instance.ShowWindowAsync().ConfigureAwait(false);
+        SendResponse(requestId, true, new { opened = true });
+    }
+
+    private async Task HandleZaiModelsAsync(string? requestId)
+    {
+        var models = await Services.Zai.ZaiEngine.Instance.ListModelsAsync().ConfigureAwait(false);
+        SendResponse(requestId, true, new
+        {
+            models = models.Select(m => new { id = m.Id, name = m.Name, locked = m.Locked }).ToList(),
+            current = Services.Zai.ZaiEngine.Instance.Model,
+        });
+    }
+
+    private async Task HandleZaiModelAsync(JsonElement data, string? requestId)
+    {
+        string name = data.TryGetProperty("name", out var nameElem) ? nameElem.GetString() ?? string.Empty : string.Empty;
+        bool applied = await Services.Zai.ZaiEngine.Instance.SetModelAsync(name).ConfigureAwait(false);
+        SendResponse(requestId, true, new { applied, name });
+    }
+
+    private Task HandleZaiStopAsync(string? requestId)
+    {
+        Services.Zai.ZaiEngine.Instance.Stop();
+        SendResponse(requestId, true, new { stopped = true });
+        return Task.CompletedTask;
+    }
+
+    private Task HandleZaiCancelAsync(JsonElement data, string? requestId)
+    {
+        string sessionId = data.TryGetProperty("sessionId", out var sElem) ? sElem.GetString() ?? string.Empty : string.Empty;
+        bool cancelled = CancelZai(sessionId);
+        SendResponse(requestId, true, new { cancelled });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// One Z.ai turn, reported through the same events every other engine posts.
+    ///
+    /// Tools, skills and MCP are the shared text protocol: the engine primes the conversation with
+    /// the guide, executes the blocks it gets back inside the working directory, and reports each
+    /// step as a timeline node. Nothing here is Z.ai specific beyond the transport.
+    /// </summary>
+    private async Task DispatchZaiAsync(
+        string sessionId,
+        string prompt,
+        string? chatId,
+        string? cwd,
+        bool skipPermissions,
+        string? profile,
+        bool toolsAllowed,
+        string? model = null)
+    {
+        var cts = new CancellationTokenSource();
+        _zaiRuns[sessionId] = cts;
+
+        static string Now() => DateTime.UtcNow.ToString("O");
+
+        try
+        {
+            Services.DeepSeek.McpRegistry.UseProfileHome(
+                string.IsNullOrWhiteSpace(profile) ? null : AntigravityProfileService.GetVirtualHomeDirectory(profile));
+        }
+        catch (Exception ex)
+        {
+            PostEventToUi("session_status", new
+            {
+                sessionId,
+                state = "running",
+                error = $"MCP profile home could not be resolved: {ex.Message}",
+                timestamp = Now(),
+            });
+        }
+
+        // An unreachable MCP server costs its tools and nothing else.
+        try
+        {
+            Services.Zai.ZaiEngine.Instance.McpTools = Services.DeepSeek.McpRegistry.Tools();
+        }
+        catch (Exception ex)
+        {
+            Services.Zai.ZaiEngine.Instance.McpTools = Array.Empty<Services.DeepSeek.McpToolInfo>();
+            EmitLog("Bridge", "warning", $"zai mcp tools unavailable: {ex.Message}");
+        }
+
+        PostEventToUi("session_status", new { sessionId, state = "running", timestamp = Now() });
+
+        // The page renders its reasoning collapsed: the body is not in the DOM until a person expands
+        // it, so there is no reasoning text to stream. The node is opened here and closed when the
+        // turn ends, the way Vyce reports a turn it can only observe from outside.
+        PostEventToUi("thinking", new
+        {
+            sessionId,
+            state = "running",
+            text = string.Empty,
+            timestamp = Now(),
+        });
+
+        var turnStarted = DateTime.UtcNow;
+
+        // The page keeps its own model selection, so a session's choice has to be applied before the
+        // turn or the answer comes from whatever was picked last. A locked model refuses quietly:
+        // the turn then runs on the page's current model instead of failing.
+        //
+        // Only a GLM name can mean anything to that menu. A session created before Z.ai was picked
+        // still carries the agy default ("Gemini 3.8 Flash (High)"), and asking the page for that
+        // logs a failure and then runs on whatever was already selected.
+        if (!string.IsNullOrWhiteSpace(model) && model.StartsWith("GLM", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                bool applied = await Services.Zai.ZaiEngine.Instance.SetModelAsync(model).ConfigureAwait(false);
+                if (!applied)
+                {
+                    EmitLog("Bridge", "warning", $"zai model {model} not applied; using the page's current model");
+                }
+            }
+            catch (Exception ex)
+            {
+                EmitLog("Bridge", "warning", $"zai model {model} could not be set: {ex.Message}");
+            }
+        }
+
+        var progress = new Progress<Services.Zai.ZaiDelta>(delta =>
+        {
+            if (!string.IsNullOrEmpty(delta.Reasoning))
+            {
+                PostEventToUi("thinking", new
+                {
+                    sessionId,
+                    state = "running",
+                    text = delta.Reasoning,
+                    thinkingTokens = 0,
+                    timestamp = Now(),
+                });
+            }
+
+            if (!string.IsNullOrEmpty(delta.Answer))
+            {
+                PostEventToUi("chat_token", new { sessionId, text = delta.Answer, timestamp = Now() });
+            }
+        });
+
+        var toolProgress = new Progress<Services.Zai.ZaiToolStep>(step =>
+        {
+            var (label, kind) = Services.DeepSeek.DeepSeekTools.Describe(step.Action);
+
+            if (step.IsStart)
+            {
+                PostEventToUi("tool_start", new
+                {
+                    sessionId,
+                    callId = step.CallId,
+                    tool = label,
+                    @params = new Dictionary<string, object?>
+                    {
+                        ["toolKind"] = kind,
+                        ["path"] = step.Path,
+                        ["action"] = step.Action,
+                        ["commandLine"] = step.Action == "run_command" ? step.Detail : null,
+                    },
+                    timestamp = Now(),
+                });
+                return;
+            }
+
+            PostEventToUi("tool_output", new
+            {
+                sessionId,
+                callId = step.CallId,
+                tool = label,
+                success = step.Success,
+                result = step.Summary,
+                error = step.Error,
+                durationMs = step.DurationMs,
+                timestamp = Now(),
+            });
+        });
+
+        // The approval card is shared with DeepSeek: same event, same reply action.
+        Services.Zai.ZaiEngine.Instance.ApprovalRequested = skipPermissions
+            ? (_, _, _) => Task.FromResult(true)
+            : async (callId, action, preview) =>
+        {
+            var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _deepSeekApprovals[callId] = pending;
+
+            PostEventToUi("deepseek_approval_request", new
+            {
+                sessionId,
+                callId,
+                action,
+                preview,
+                timestamp = Now(),
+            });
+
+            using var registration = cts.Token.Register(() => pending.TrySetResult(false));
+            bool approved = await pending.Task.ConfigureAwait(false);
+            _deepSeekApprovals.TryRemove(callId, out _);
+            return approved;
+        };
+
+        try
+        {
+            string? knownChat = chatId;
+
+            var reply = await Services.Zai.ZaiEngine.Instance
+                .SendAsync(prompt, chatId, cwd, progress, toolProgress, id =>
+                {
+                    if (string.IsNullOrWhiteSpace(id) || string.Equals(id, knownChat, StringComparison.Ordinal)) return;
+                    knownChat = id;
+                    PostEventToUi("conversation_started", new
+                    {
+                        sessionId,
+                        conversationId = id,
+                        timestamp = Now(),
+                    });
+                }, toolsAllowed, cts.Token)
+                .ConfigureAwait(false);
+
+            PostEventToUi("thinking", new
+            {
+                sessionId,
+                state = "done",
+                durationSeconds = Math.Round((DateTime.UtcNow - turnStarted).TotalSeconds, 1),
+                thinkingTokens = 0,
+                timestamp = Now(),
+            });
+
+            PostEventToUi("chat_final", new
+            {
+                sessionId,
+                text = reply.Answer,
+                timestamp = Now(),
+            });
+
+            PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
+        }
+        catch (OperationCanceledException)
+        {
+            PostEventToUi("thinking", new
+            {
+                sessionId,
+                state = "done",
+                durationSeconds = Math.Round((DateTime.UtcNow - turnStarted).TotalSeconds, 1),
+                thinkingTokens = 0,
+                timestamp = Now(),
+            });
+
+            PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
+        }
+        catch (Exception ex)
+        {
+            // A failed turn must not leave the thought node spinning forever.
+            PostEventToUi("thinking", new
+            {
+                sessionId,
+                state = "done",
+                durationSeconds = Math.Round((DateTime.UtcNow - turnStarted).TotalSeconds, 1),
+                thinkingTokens = 0,
+                timestamp = Now(),
+            });
+
+            PostEventToUi("session_status", new
+            {
+                sessionId,
+                state = "error",
+                error = ex.Message,
+                timestamp = Now(),
+            });
+        }
+        finally
+        {
+            _zaiRuns.TryRemove(sessionId, out _);
+            cts.Dispose();
+        }
+    }
+
+    private bool CancelZai(string sessionId)
+    {
+        if (!_zaiRuns.TryGetValue(sessionId, out var cts)) return false;
+        try
+        {
+            cts.Cancel();
+            Services.Zai.ZaiEngine.Instance.Stop();
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
     private async Task HandleDeepseekStatusAsync(string? requestId)
     {
         bool signedIn = await Services.DeepSeek.DeepSeekEngine.Instance.ProbeSignedInAsync().ConfigureAwait(false);

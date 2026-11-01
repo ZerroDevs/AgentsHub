@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, ChevronRight, Loader2, Sparkles } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, RefreshCw, Sparkles } from 'lucide-react';
 import { useModelStore, effortLabel, findBaseModel, resolveModelId } from '../../store/useModelStore';
 import { useSessionStore } from '../../store/useSessionStore';
 import { ModelInfo } from '../../types/agent';
@@ -169,10 +169,21 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
         className="fixed z-[80] rounded-xl border border-surface-border bg-surface-card shadow-2xl"
       >
         <div className="flex items-center justify-between rounded-t-xl border-b border-surface-border/70 px-3 py-1.5">
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-content-dim">Model</span>
+          <span className="text-[10.5px] font-medium text-content-dim">Model</span>
           <span className="flex items-center gap-1.5 font-mono text-[10px] text-content-dim">
-            {isLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
             {models.length > 0 ? <span>{models.length}</span> : null}
+            {/* The catalogue is cached for five minutes and the probe can come back empty, so a
+                manual re-read has to survive that cache. */}
+            <button
+              type="button"
+              onClick={() => void load(cli, { force: true })}
+              disabled={isLoading}
+              aria-label="Refresh model list"
+              title={isLoading ? 'Reading the model list…' : 'Read the model list again'}
+              className="-mr-1 rounded p-1 transition-colors hover:text-content-main focus-visible:text-accent focus-visible:outline-none disabled:opacity-60"
+            >
+              <RefreshCw className={`h-3 w-3 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
           </span>
         </div>
 
@@ -251,7 +262,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
               aria-label="Reasoning effort"
               onMouseLeave={() => setIsEffortOpen(false)}
             >
-              <div className="border-b border-surface-border/70 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-content-dim">
+              <div className="border-b border-surface-border/70 px-3 py-1.5 text-[10.5px] font-medium text-content-dim">
                 Thinking effort
               </div>
               <div className="py-1">

@@ -160,7 +160,7 @@ export const VyceModelChip: React.FC<VyceModelChipProps> = ({ workingDirectory }
                 aria-label="Vyce models"
               >
                 <div className="flex items-center justify-between rounded-t-xl border-b border-surface-border/70 px-3 py-1.5">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-content-dim">
+                  <span className="text-[10.5px] font-medium text-content-dim">
                     Model
                   </span>
                   <span className="flex items-center gap-1.5 font-mono text-[10px] text-content-dim">

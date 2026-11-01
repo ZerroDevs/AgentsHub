@@ -101,7 +101,9 @@ public sealed class ModelCatalogService
         if (string.IsNullOrWhiteSpace(cli)) return "antigravity";
 
         string id = cli.Trim().ToLowerInvariant().Replace('-', '_');
-        if (id.Contains("antigravity", StringComparison.Ordinal) || id == "agy") return "antigravity";
+        // Sessions older than the per-session engine field still report the workspace CLI, and the
+        // agent chat runs agy whatever that workspace says, so Hub and agy share one catalogue.
+        if (id.Contains("antigravity", StringComparison.Ordinal) || id is "agy" or "hub") return "antigravity";
         if (id.Contains("claude", StringComparison.Ordinal)) return "claude";
         if (id.Contains("codex", StringComparison.Ordinal)) return "codex";
         return "custom";

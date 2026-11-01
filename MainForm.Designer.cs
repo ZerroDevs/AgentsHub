@@ -36,7 +36,7 @@ partial class MainForm
         ClientSize = new Size(1180, 760);
         MinimumSize = new Size(960, 620);
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "Agents Hub - Multi-Agent Desktop Hub and CLI Workspace";
+        Text = "Agents Hub";
         Name = "MainForm";
         DoubleBuffered = true;
 

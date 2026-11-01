@@ -114,6 +114,8 @@ export const engineIcons = {
   agy: antigravity,
   deepseek,
   qwen,
+  /** GLM has no sticker of its own in the sheets; the chip artwork is the closest honest match. */
+  zai: chip,
   vyce,
   opencode,
 } as const;

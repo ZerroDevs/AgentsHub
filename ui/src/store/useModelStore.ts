@@ -160,7 +160,11 @@ export const useModelStore = create<ModelStoreState>((set, get) => ({
     set({ isLoading: true, error: undefined });
 
     try {
-      const response = await webviewBridge.invoke<unknown>('get_model_catalog', { cli }, 30000);
+      const response = await webviewBridge.invoke<unknown>(
+        'get_model_catalog',
+        { cli, force: options.force === true },
+        30000
+      );
       const catalog = normaliseCatalog(response);
 
       if (!catalog) {

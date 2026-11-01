@@ -31,7 +31,7 @@ function resolveContext(sessionId: string) {
   // OpenCode's ids are `provider/model` and belong to its own catalogue; resolving them against the
   // agy list would replace a real id with a guess.
   const model =
-    session?.engine === 'opencode'
+    session?.engine === 'opencode' || session?.engine === 'zai'
       ? session?.model || undefined
       : models.length > 0
         ? resolveModelId(models, session?.model, session?.reasoningEffort)
@@ -214,7 +214,12 @@ export async function stopGeneration(sessionId: string): Promise<void> {
     // A DeepSeek turn runs in the host's own WebView2, so `abort_task` (which reaches the sidecar)
     // would be a no-op for it. Route the stop to whichever engine owns the session.
     const session = useSessionStore.getState().sessions[sessionId];
-    const action = session?.engine === 'deepseek' ? 'deepseek_cancel' : 'abort_task';
+    const action =
+      session?.engine === 'deepseek'
+        ? 'deepseek_cancel'
+        : session?.engine === 'zai'
+          ? 'zai_cancel'
+          : 'abort_task';
     await webviewBridge.invoke(action, { taskId: sessionId, sessionId, reason: 'user_stopped' });
   } catch (err) {
     console.warn('[chatController] stop failed:', err);

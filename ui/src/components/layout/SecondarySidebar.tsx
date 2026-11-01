@@ -120,7 +120,10 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
     });
   };
 
-  const startSession = (workspaceId: string | null, engine: 'agy' | 'deepseek' | 'qwen' | 'vyce' | 'opencode') => {
+  const startSession = (
+    workspaceId: string | null,
+    engine: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'vyce' | 'opencode'
+  ) => {
     setNewSessionMenu(null);
 
     const newId = createSession(activeProfileName, undefined, workspaceId, engine);
@@ -135,8 +138,6 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
         .catch(() => {});
     }
   };
-
-  const handleNewSessionInWorkspace = (workspaceId: string | null) => startSession(workspaceId, 'agy');
 
   // Merge active local sessions with backend sessions
   const localSessionList = Object.values(sessions).map(s => ({
@@ -225,26 +226,27 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
     const isCollapsed = !!collapsedGroups[groupKey];
 
     return (
-      <div key={groupKey} className="space-y-1">
+      <div key={groupKey} className="group/row space-y-1">
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => toggleGroup(groupKey)}
-            className="min-w-0 flex-1 flex items-center justify-between px-2 py-1.5 text-[10px] uppercase tracking-wider text-content-dim font-semibold hover:text-content-main rounded hover:bg-surface-card transition select-none"
+            className="min-w-0 flex-1 flex items-center justify-between px-2 py-1.5 text-[11px] font-medium text-content-muted hover:text-content-main rounded hover:bg-surface-card transition select-none"
           >
             <span className="flex min-w-0 items-center space-x-1.5">
               {isCollapsed ? <ChevronRight className="w-3 h-3 flex-shrink-0 text-content-dim" /> : <ChevronDown className="w-3 h-3 flex-shrink-0 text-content-dim" />}
               <span className="truncate">{title}</span>
             </span>
-            <span className="ml-1 font-mono text-[9px] px-1.5 py-0.5 rounded bg-surface-card border border-surface-border text-content-dim">
-              {items.length}
-            </span>
+            {/* A count of zero is not information. It only appears once there is something to count. */}
+            {items.length > 0 ? (
+              <span className="ml-1 font-mono text-[9.5px] text-content-dim">{items.length}</span>
+            ) : null}
           </button>
 
           <button
             type="button"
             onClick={event => openNewSessionMenu(event, isWorkspace ? groupKey : null)}
-            className="flex-shrink-0 rounded p-1 text-content-dim transition hover:bg-surface-hover hover:text-accent"
+            className="flex-shrink-0 rounded p-1 text-content-dim opacity-0 transition group-hover/row:opacity-100 focus-visible:opacity-100 hover:bg-surface-hover hover:text-accent"
             title={`New conversation in ${title} (choose engine)`}
             aria-label={`New conversation in ${title}`}
           >
@@ -254,20 +256,12 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
 
         {!isCollapsed && (
           <div className="space-y-1">
-            {items.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => handleNewSessionInWorkspace(isWorkspace ? groupKey : null)}
-                className="w-full rounded-lg px-2.5 py-1.5 text-left text-[11px] text-content-dim transition hover:bg-surface-card hover:text-content-main"
-              >
-                No conversations yet. Start one
-              </button>
-            ) : null}
             {items.map(s => {
               const isActive = s.sessionId === activeSessionId;
               const isRenaming = renamingId === s.sessionId;
               const isDeepSeek = (s as { engine?: string }).engine === 'deepseek';
               const isQwen = (s as { engine?: string }).engine === 'qwen';
+              const isZai = (s as { engine?: string }).engine === 'zai';
               const isVyce = (s as { engine?: string }).engine === 'vyce';
               const isOpenCode = (s as { engine?: string }).engine === 'opencode';
 
@@ -319,7 +313,7 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                   }`}
                   title={
                     s.isLocal
-                      ? `${s.goal || s.sessionId}${isQwen ? ' (Qwen, runs in this app)' : isDeepSeek ? ' (DeepSeek, runs in this app)' : isVyce ? ' (Vyce Code, runs in a hidden console)' : isOpenCode ? ' (OpenCode, headless)' : ''}. Double-click to rename`
+                      ? `${s.goal || s.sessionId}${isQwen ? ' (Qwen, runs in this app)' : isZai ? ' (Z.ai GLM, runs in this app)' : isDeepSeek ? ' (DeepSeek, runs in this app)' : isVyce ? ' (Vyce Code, runs in a hidden console)' : isOpenCode ? ' (OpenCode, headless)' : ''}. Double-click to rename`
                       : `${s.goal || s.sessionId} — found in the CLI's own history. Not importable yet, so it cannot be opened here.`
                   }
                 >
@@ -327,6 +321,11 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                     <Sparkles
                       className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-violet-400' : 'text-violet-400/70'}`}
                       aria-label="Qwen chat"
+                    />
+                  ) : isZai ? (
+                    <Sparkles
+                      className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-accent' : 'text-accent/70'}`}
+                      aria-label="Z.ai GLM chat"
                     />
                   ) : isDeepSeek ? (
                     <Brain
@@ -562,10 +561,15 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
         {workspaceGroups.map(group => renderSessionGroup(group.name, group.items, group.id))}
 
         {allSessions.length === 0 && (
-          <div className="py-6 text-center text-xs text-content-dim italic flex flex-col items-center gap-1.5">
-            <p>No past sessions recorded.</p>
-            <button onClick={handleNewSession} className="text-sky-400 hover:underline text-xs font-medium">
-              Create first session &rarr;
+          <div className="flex flex-col items-center gap-2.5 px-4 py-8 text-center">
+            <p className="text-xs leading-relaxed text-content-muted">
+              No conversations yet. A new one opens in {activeWorkspace?.name || 'the active workspace'}.
+            </p>
+            <button
+              onClick={handleNewSession}
+              className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-sky-400"
+            >
+              Start a conversation
             </button>
           </div>
         )}
@@ -577,7 +581,7 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
           <button
             type="button"
             onClick={toggleFiles}
-            className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-content-dim font-semibold transition-colors hover:text-content-main"
+            className="flex items-center gap-1 text-[11px] font-medium text-content-muted transition-colors hover:text-content-main"
             title={isFilesOpen ? 'Hide the file list' : 'Show the file list'}
           >
             <ChevronDown className={`w-3 h-3 transition-transform ${isFilesOpen ? '' : '-rotate-90'}`} />
@@ -686,6 +690,20 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[11px] font-medium text-content-main">Use Qwen</span>
                       <span className="block truncate text-[9.5px] text-content-dim">Free, no account</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Z.ai (GLM): free without an account, better signed in"
+                    onClick={() => startSession(newSessionMenu.workspaceId, 'zai')}
+                    className="flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none"
+                  >
+                    <img src={engineIcons.zai} alt="" className="mt-0.5 h-5 w-5 flex-shrink-0 object-contain" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[11px] font-medium text-content-main">Use Z.ai (GLM)</span>
+                      <span className="block truncate text-[9.5px] text-content-dim">Free as guest</span>
                     </span>
                   </button>
 

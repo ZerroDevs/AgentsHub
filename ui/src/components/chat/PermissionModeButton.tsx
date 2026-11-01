@@ -11,7 +11,7 @@ interface PermissionModeButtonProps {
    * Which engine the copy is written for. The setting is the same profile flag either way, but a
    * DeepSeek turn has no shell policy: it has an approval card for writes and commands.
    */
-  engine?: 'agy' | 'deepseek' | 'qwen';
+  engine?: 'agy' | 'deepseek' | 'qwen' | 'zai';
 }
 
 const PANEL_WIDTH = 296;
@@ -27,7 +27,9 @@ const VIEWPORT_MARGIN = 8;
  * copy says so rather than implying the agent will ask.
  */
 export const PermissionModeButton: React.FC<PermissionModeButtonProps> = ({ profileName, engine }) => {
-  const isDeepSeek = engine === 'deepseek';
+  // Z.ai uses the same approval card as DeepSeek, so the copy describes the card rather than a
+  // shell policy.
+  const isDeepSeek = engine === 'deepseek' || engine === 'zai';
   const profiles = useProfileStore(state => state.profiles);
   const activeProfileName = useProfileStore(state => state.activeProfileName);
   const setSkipPermissions = useProfileStore(state => state.setSkipPermissions);

@@ -18,6 +18,9 @@ interface ChatMessageListProps {
   activeExecutionCardId?: string;
   /** True while the active session has a turn in flight. */
   isGenerating?: boolean;
+  /** Why a send would be refused right now, if it would be. */
+  blockedNotice?: string | null;
+  onStartRunner?: () => void;
 }
 
 const ACTIVE_STATES = new Set(['running', 'thinking', 'tool_executing']);
@@ -90,7 +93,12 @@ function renderPromptText(prompt?: string): React.ReactNode {
   return parts;
 }
 
-export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, isGenerating = false }) => {
+export const ChatMessageList: React.FC<ChatMessageListProps> = ({
+  messages,
+  isGenerating = false,
+  blockedNotice,
+  onStartRunner,
+}) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
 
@@ -167,12 +175,31 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, isGe
         <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-surface-border bg-surface-card p-2">
           <img src={mascot.terminal} alt="" className="h-full w-full object-contain" />
         </div>
-        <h3 className="mb-1 text-base font-semibold text-content-main">Agents Hub Workspace</h3>
-        <p className="mb-6 max-w-sm text-xs leading-relaxed text-content-muted">
-          Send a prompt to run the agent in this workspace. Steps stream into a timeline above the
-          reply, and every command can be expanded to its full output.
-        </p>
-        <p className="max-w-sm font-mono text-[11px] leading-relaxed text-content-dim">
+        <h3 className="mb-1 text-base font-semibold text-content-main">Agents Hub</h3>
+
+        {/* The blocked case names the fix and puts it here. It used to be a word in a warning bar
+            a few hundred pixels away, next to a composer that silently refused the send. */}
+        {blockedNotice ? (
+          <div className="mb-6 flex max-w-sm flex-col items-center gap-2.5">
+            <p className="text-xs leading-relaxed text-content-muted">{blockedNotice}</p>
+            {onStartRunner ? (
+              <button
+                type="button"
+                onClick={onStartRunner}
+                className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-sky-400 active:scale-95"
+              >
+                Start runner
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mb-6 max-w-sm text-xs leading-relaxed text-content-muted">
+            Send a prompt to run the agent in this workspace. Steps stream into a timeline above
+            the reply, and every command can be expanded to its full output.
+          </p>
+        )}
+
+        <p className="max-w-sm text-[11px] leading-relaxed text-content-dim">
           Type <span className="text-accent">/help</span> for the active engine's commands.
         </p>
       </div>

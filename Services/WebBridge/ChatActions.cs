@@ -247,6 +247,36 @@ public sealed partial class DashboardWebBridge : IDisposable
             SendResponse(requestId, true, new { started = true, engine = "opencode" });
             return;
         }
+        if (string.Equals(engine, "zai", StringComparison.OrdinalIgnoreCase))
+        {
+            // Fire and forget for the same reason DeepSeek is: a turn can prime, run several tool
+            // rounds and take minutes, and awaiting it here would trip the UI's request timeout.
+            bool zaiTools = !data.TryGetProperty("toolsEnabled", out var ztElem) || ztElem.ValueKind != JsonValueKind.False;
+            string? zaiModel = data.TryGetProperty("model", out var zmElem) ? zmElem.GetString() : null;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await DispatchZaiAsync(sessionId, prompt, conversationId, cwd, skipPermissions, profile, zaiTools, zaiModel)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    PostEventToUi("session_status", new
+                    {
+                        sessionId,
+                        state = "error",
+                        error = ex.Message,
+                        timestamp = DateTime.UtcNow.ToString("O"),
+                    });
+                }
+            });
+
+            SendResponse(requestId, true, new { sent = true, sessionId, engine = "zai" });
+            return;
+        }
+
         if (string.Equals(engine, "deepseek", StringComparison.OrdinalIgnoreCase))
         {
             // Fire and forget, exactly like the sidecar path. A DeepSeek turn can run for
@@ -453,6 +483,11 @@ public sealed partial class DashboardWebBridge : IDisposable
             string? cli = data.TryGetProperty("cli", out var mcElem) ? mcElem.GetString() : null;
             if (string.IsNullOrWhiteSpace(cli)) cli = activeWs?.PrimaryCli;
 
+            // The refresh button has to beat the catalog's own five-minute cache, not just the
+            // renderer's, or pressing it looks like nothing happened.
+            bool force = data.TryGetProperty("force", out var forceElem) && forceElem.ValueKind == JsonValueKind.True;
+            if (force) ModelCatalogService.Instance.Invalidate();
+
             var catalog = await ModelCatalogService.Instance.GetCatalogAsync(cli).ConfigureAwait(false);
             SendResponse(requestId, true, catalog);
         }
@@ -482,6 +517,9 @@ public sealed partial class DashboardWebBridge : IDisposable
             // sidecar. The web engines run inside this process, so they are stopped here as
             // well; each call is a no-op when that engine has no turn in flight.
             Services.DeepSeek.DeepSeekEngine.Instance.Stop();
+
+            // Z.ai runs on its own page; its stop cancels the read loop and the turn token.
+            Services.Zai.ZaiEngine.Instance.Stop();
 
             // Qwen's stop has to click its page on the UI thread, so it is fired and forgotten
             // rather than awaited: the abort response should not wait on a click.

@@ -218,6 +218,10 @@ public partial class MainForm : Form
                 // Same reason, same place: the Qwen window is a WebView2 host and must be created
                 // here. Built on first use from the bridge, it hung forever with no message pump.
                 Services.Qwen.QwenEngine.Instance.Initialize(this);
+
+                // A third page engine, created here for the same thread-affinity reason. Its page is
+                // navigated on the first turn, not at startup, so a Z.ai chat costs nothing until used.
+                Services.Zai.ZaiEngine.Instance.Initialize(this);
             }
 
             // Automatically start the compiled Bun Sidecar Engine in the background
@@ -407,7 +411,7 @@ public partial class MainForm : Form
 
         _notifyIcon = new NotifyIcon
         {
-            Text = "Agents Hub - Multi-Agent Workspace",
+            Text = "Agents Hub",
             Icon = _trayIcon ?? _appIcon ?? SystemIcons.Application,
             ContextMenuStrip = _trayContextMenu,
             Visible = true

@@ -13,6 +13,7 @@ import { ImageLightbox } from './ImageLightbox';
 import { PermissionModeButton } from './PermissionModeButton';
 import { VyceModelChip } from './VyceModelChip';
 import { OpenCodeModelChip } from './OpenCodeModelChip';
+import { ZaiModelChip } from './ZaiModelChip';
 import { TokenUsageTooltip } from './TokenUsageTooltip';
 import { CircularQuotaWidget } from './CircularQuotaWidget';
 
@@ -40,7 +41,7 @@ interface ChatInputProps {
    * `vyce` drives the Vyce Code TUI in a hidden console, so the model picker, the permission switch
    * and the quota ring do not apply to either.
    */
-  engine?: 'agy' | 'deepseek' | 'qwen' | 'vyce' | 'opencode';
+  engine?: 'agy' | 'deepseek' | 'qwen' | 'zai' | 'vyce' | 'opencode';
   /** Null until the host has answered; drives the sign-in bar for a DeepSeek session. */
   deepSeekSignedIn?: boolean | null;
   /** Opens the one-time DeepSeek sign-in window. */
@@ -444,6 +445,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   /** Qwen is the same shape as DeepSeek: a web page we drive, not a CLI. */
   const isQwen = engine === 'qwen';
   const isOpenCode = engine === 'opencode';
+  /** Z.ai is a page we drive, like DeepSeek, so it carries its own model chip and no quota ring. */
+  const isZai = engine === 'zai';
   /** Vyce is the Vyce Code TUI, driven in a hidden console: no model picker, no policy switch. */
   const isVyce = engine === 'vyce';
   /** One-time hint that a guest account is the weaker way to use Qwen. */
@@ -545,8 +548,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           />
         ) : null}
 
+        {/* Solid, flat, one radius step above a panel. A blurred glass card with a 2xl shadow was
+            the loudest surface in the app and it was an input field. */}
         <div
-          className={`w-full rounded-2xl border transition-all shadow-2xl overflow-hidden bg-surface-card/95 backdrop-blur-md ${
+          className={`w-full rounded-xl border transition-colors overflow-hidden bg-surface-card ${
             isDragging
               ? 'border-sky-400 ring-2 ring-sky-500/30 bg-sky-500/5'
               : 'border-surface-border focus-within:border-sky-500/70 focus-within:ring-1 focus-within:ring-sky-500/30'
@@ -655,7 +660,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           <div className="flex items-start gap-2 border-b border-surface-border/40 px-3.5 py-2">
             <Quote className="mt-0.5 h-3 w-3 flex-shrink-0 text-accent" />
             <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-mono uppercase tracking-wide text-content-dim">
+              <p className="text-[10.5px] font-medium text-content-dim">
                 Quoted from the conversation
               </p>
               <p className="truncate text-[11px] text-content-muted" title={quoteLines.join('\n')}>
@@ -755,7 +760,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <button
                 type="button"
                 onClick={onStartRunner}
-                className="flex-shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] text-state-warning transition-colors hover:bg-amber-500/20"
+                className="flex-shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10.5px] text-state-warning transition-colors hover:bg-amber-500/20"
               >
                 Start
               </button>
@@ -836,7 +841,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               ? 'Working... type here to queue a follow-up, Enter sends it when this turn finishes'
               : attachments.length > 0
                 ? 'Add instructions for attached files, or press Enter to send...'
-                : "Send instructions to active agent (e.g. 'Build an express route', '/diff', '/switch-profile')..."
+                : 'Ask the agent to build, fix, or explain something'
           }
           rows={1}
           className="w-full px-4 pt-3.5 pb-2 bg-transparent text-xs text-content-main placeholder:text-content-dim focus:outline-none resize-none leading-relaxed font-sans max-h-48"
@@ -868,7 +873,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono text-content-muted hover:text-content-main hover:bg-surface-hover transition"
               title="Inspect Git Changes"
             >
-              <GitBranch className="w-3 h-3 text-state-success" />
+              <GitBranch className="w-3 h-3" />
               <span>Git</span>
             </button>
 
@@ -909,6 +914,24 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
                 {/* Full access is what becomes `--auto`; a headless run cannot answer a prompt. */}
                 <PermissionModeButton profileName={profileName} />
+              </>
+            ) : isZai ? (
+              <>
+                <span
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] text-accent"
+                  title="Answers come from chat.z.ai (GLM). Tools, skills and MCP run through the same protocol the other web engines use."
+                >
+                  <Sparkles className="h-3 w-3" />
+                  Z.ai
+                </span>
+
+                <span className="opacity-30">|</span>
+
+                <ZaiModelChip sessionId={sessionId} model={activeModel} />
+
+                <span className="opacity-30">|</span>
+
+                <PermissionModeButton profileName={profileName} engine="zai" />
               </>
             ) : isDeepSeek || isQwen ? (
               /* No model to pick and no permission policy to set: the engine is a web chat, which
@@ -972,7 +995,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   sessionId={sessionId}
                   model={activeModel}
                   effort={reasoningEffort}
-                  cli={activeCli}
+                  cli={engine ?? activeCli}
                 />
 
                 <span className="opacity-30">|</span>
@@ -984,7 +1007,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
           {/* Right: quota ring, optional token readout, then the single morphing action button */}
           <div className="flex flex-shrink-0 items-center space-x-2.5">
-            {isDeepSeek || isQwen || isVyce || isOpenCode ? null : <CircularQuotaWidget profileName={profileName} />}
+            {isDeepSeek || isQwen || isZai || isVyce || isOpenCode ? null : <CircularQuotaWidget profileName={profileName} />}
 
             {turnTokens > 0 ? (
               <TokenUsageTooltip turn={lastTurnTokens} session={sessionTokens} turns={turnCount} />
