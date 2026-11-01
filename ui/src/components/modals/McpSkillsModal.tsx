@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Cpu, Sparkles, ShieldCheck, KeyRound } from 'lucide-react';
+import { Cpu, Sparkles, ShieldCheck, KeyRound } from 'lucide-react';
+import { actionIcons } from '../../lib/toolIcons';
 import { Button } from '../common/Button';
 import { useSettingsStore } from '../../store/useSettingsStore';
 
@@ -32,7 +33,7 @@ export const McpSkillsModal: React.FC<McpSkillsModalProps> = ({ isOpen, onClose 
             onClick={onClose}
             className="p-1 rounded text-content-muted hover:text-content-main hover:bg-surface-deep transition"
           >
-            <X className="w-4 h-4" />
+            <img src={actionIcons.close} alt="Close" className="h-4 w-4 object-contain" />
           </button>
         </div>
 

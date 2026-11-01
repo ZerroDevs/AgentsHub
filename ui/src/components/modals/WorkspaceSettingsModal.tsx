@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Folder, Trash2, Check, Loader2 } from 'lucide-react';
+import { Folder, Trash2, Check, Loader2 } from 'lucide-react';
+import { actionIcons } from '../../lib/toolIcons';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useProfileStore } from '../../store/useProfileStore';
 import { ProjectWorkspace } from '../../types/agent';
@@ -121,7 +122,7 @@ export const WorkspaceSettingsModal: React.FC<WorkspaceSettingsModalProps> = ({ 
             onClick={onClose}
             className="p-1 rounded text-content-muted hover:text-content-main hover:bg-surface-deep transition"
           >
-            <X className="w-4 h-4" />
+            <img src={actionIcons.close} alt="Close" className="h-4 w-4 object-contain" />
           </button>
         </div>
 

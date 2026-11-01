@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, UserPlus, Key } from 'lucide-react';
+import { UserPlus, Key } from 'lucide-react';
+import { actionIcons } from '../../lib/toolIcons';
 import { Button } from '../common/Button';
 import { webviewBridge } from '../../services/webviewBridge';
 import { useProfileStore } from '../../store/useProfileStore';
@@ -55,7 +56,7 @@ export const AddProfileModal: React.FC<AddProfileModalProps> = ({ isOpen, onClos
             onClick={onClose}
             className="p-1 rounded text-content-muted hover:text-content-main hover:bg-slate-800 transition"
           >
-            <X className="w-4 h-4" />
+            <img src={actionIcons.close} alt="Close" className="h-4 w-4 object-contain" />
           </button>
         </div>
 

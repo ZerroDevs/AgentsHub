@@ -4,6 +4,7 @@ import { Button } from '../common/Button';
 import { webviewBridge } from '../../services/webviewBridge';
 import { useLanStore } from '../../store/useLanStore';
 import { useProfileStore } from '../../store/useProfileStore';
+import { lanIcons } from '../../lib/toolIcons';
 
 /**
  * LAN access lives in Settings now: it is a network-exposure switch, not a workspace view. Nothing
@@ -63,7 +64,14 @@ export const LanSettings: React.FC = () => {
       <div className="space-y-4 rounded-xl border border-[var(--border-subtle,#1E293B)] bg-[var(--bg-card,#0F172A)] p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="text-sm font-bold text-[var(--text-main,#F1F5F9)]">LAN access</h3>
+            <div className="flex items-center gap-2">
+              <img
+                src={running ? lanIcons.on : lanIcons.off}
+                alt=""
+                className="h-5 w-5 flex-shrink-0 object-contain"
+              />
+              <h3 className="text-sm font-bold text-[var(--text-main,#F1F5F9)]">LAN access</h3>
+            </div>
             <p className="mt-0.5 text-xs text-[var(--text-dim,#64748B)]">
               Reach the workspace and the ports you pick from another device on this network. Off means nothing
               is listening.

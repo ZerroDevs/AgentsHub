@@ -49,6 +49,7 @@ public partial class MainForm : Form
 
     private bool _isExiting;
     private Icon? _appIcon;
+    private Icon? _trayIcon;
     private MiniBarForm? _miniBarForm;
     private const int HotkeyMiniBarId = 9193;
     private bool _miniBarHotkeyRegistered;
@@ -389,10 +390,19 @@ public partial class MainForm : Form
 
         ApplyTrayTheme();
 
+        // The blue tile disappears against a dark taskbar, so the tray takes the flat white mark.
+        try
+        {
+            var trayIconPath = Path.Combine(AppContext.BaseDirectory, "assets", "tray.ico");
+            if (File.Exists(trayIconPath))
+                _trayIcon = new Icon(trayIconPath, SystemInformation.SmallIconSize);
+        }
+        catch { }
+
         _notifyIcon = new NotifyIcon
         {
             Text = "Agents Hub - Multi-Agent Workspace",
-            Icon = _appIcon ?? SystemIcons.Application,
+            Icon = _trayIcon ?? _appIcon ?? SystemIcons.Application,
             ContextMenuStrip = _trayContextMenu,
             Visible = true
         };

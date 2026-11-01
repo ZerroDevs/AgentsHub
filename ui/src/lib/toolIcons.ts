@@ -1,5 +1,5 @@
-// Icons cut from the sticker sheets in assets/AgAssets by tools/extract-icons.py and
-// tools/convert-new.py.
+// Icons cut from the sticker sheets in assets/AgAssets by tools/extract-icons.py,
+// tools/convert-new.py and tools/convert-new2.py.
 //
 // Imported rather than referenced by URL: the UI is served from a file-backed virtual host
 // with base './', so an absolute /icons/... path does not resolve there.
@@ -10,6 +10,8 @@ import folder from '../assets/icons/tools/folder.png';
 import gear from '../assets/icons/tools/gear.png';
 import genericTool from '../assets/icons/tools/generic.png';
 import terminal from '../assets/icons/tools/terminal.png';
+import wifi from '../assets/icons/tools/wifi.png';
+import wifiOff from '../assets/icons/tools/wifi-off.png';
 import brain from '../assets/icons/ai/brain.png';
 import chat from '../assets/icons/ai/chat.png';
 import chip from '../assets/icons/ai/chip.png';
@@ -33,6 +35,7 @@ import lan from '../assets/icons/sections/lan.png';
 import logs from '../assets/icons/sections/logs.png';
 import security from '../assets/icons/sections/security.png';
 import actionAdd from '../assets/icons/actions/add.png';
+import actionClose from '../assets/icons/actions/close.png';
 import actionCopy from '../assets/icons/actions/copy.png';
 import actionDownload from '../assets/icons/actions/download.png';
 import actionExternal from '../assets/icons/actions/external.png';
@@ -64,6 +67,7 @@ import objectWorkspace from '../assets/icons/objects/workspace.png';
 import catConfused from '../assets/icons/mascot/cat-confused.png';
 import catTerminal from '../assets/icons/mascot/cat-terminal.png';
 import logo from '../assets/icons/brand/logo.png';
+import logoWhite from '../assets/icons/brand/logo-white.png';
 
 /** Tools the host seeds itself. */
 const BY_ID: Record<string, string> = {
@@ -129,6 +133,7 @@ export const sectionIcons: Record<string, string> = {
 
 export const actionIcons = {
   add: actionAdd,
+  close: actionClose,
   copy: actionCopy,
   download: actionDownload,
   external: actionExternal,
@@ -170,8 +175,17 @@ export const mascot = {
   terminal: catTerminal,
 };
 
+/** Wired and unwired marks for the Remote Access header. */
+export const lanIcons = { on: wifi, off: wifiOff };
+
 /** The app mark, cut from assets/AgAssets/logo.png. */
 export const brandLogo = logo;
+
+/**
+ * The same mark as a flat white silhouette. The blue tile needs a light surface, so anything
+ * that draws the logo 16 px high on a dark title bar (tray, installer header) uses this one.
+ */
+export const brandLogoWhite = logoWhite;
 
 /** Sticker glyphs for headers and tiles, where there is room for a drawn icon. */
 export const sticker = {

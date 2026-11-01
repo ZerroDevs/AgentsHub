@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, GitBranch, RefreshCw, FileText, Check, Plus, Minus, Folder } from 'lucide-react';
+import { GitBranch, RefreshCw, FileText, Check, Plus, Minus, Folder } from 'lucide-react';
+import { actionIcons } from '../../lib/toolIcons';
 import { Button } from '../common/Button';
 import { webviewBridge } from '../../services/webviewBridge';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
@@ -117,7 +118,7 @@ export const GitDiffModal: React.FC<GitDiffModalProps> = ({ isOpen, onClose }) =
               className="p-1.5 rounded-lg text-content-dim hover:text-content-main hover:bg-surface-deep transition"
               title="Close modal"
             >
-              <X className="w-4 h-4" />
+              <img src={actionIcons.close} alt="Close" className="h-4 w-4 object-contain" />
             </button>
           </div>
         </div>
