@@ -681,7 +681,7 @@ public sealed class GitHubService
                 scope = "settings";
             else if (first.Contains("terminal"))
                 scope = "terminals";
-            else if (first.Contains("quota") || first.Contains("vpn"))
+            else if (first.Contains("quota") || first.Contains("network"))
                 scope = "network";
             else if (first.StartsWith("ui/"))
                 scope = "ui";

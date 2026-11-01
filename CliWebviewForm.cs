@@ -3344,9 +3344,10 @@ public partial class CliWebviewForm : Form
     /// </summary>
     private static void ConfigureWebViewSettings(CoreWebView2 webView)
     {
+        // Terminal and workspace pages reach loopback CLIs, and each of them can type into the
+        // host bridge. Keep navigation on loopback or the shipped ui folder.
+        Helpers.WebViewSecurity.Apply(webView, allowLoopback: true);
         webView.Settings.AreDefaultContextMenusEnabled = true;
-        webView.Settings.AreDevToolsEnabled = true;
-        webView.Settings.IsStatusBarEnabled = false;
         webView.Settings.IsZoomControlEnabled = true;
     }
 

@@ -87,8 +87,13 @@ foreach ($target in $Targets) {
             & dotnet publish "$rootDir\AgentsHub.csproj" -f net10.0-windows -c Release -r win-x64 --self-contained -o $publishDir
             if ($LASTEXITCODE -ne 0) { throw "Dotnet publish failed for win-x64" }
 
+            # Per-profile OAuth tokens belong to the machine that ran the app. A publish folder
+            # that was used as a run directory can carry them, so they never enter a package.
+            Remove-Item (Join-Path $publishDir "Profiles") -Recurse -Force -ErrorAction SilentlyContinue
+
             # Copy to staging for zip packaging
             Copy-Item "$publishDir\*" $stagingDir -Recurse -Force
+            Remove-Item (Join-Path $stagingDir "Profiles") -Recurse -Force -ErrorAction SilentlyContinue
 
             # 2. Package Portable Zip
             $zipPath = Join-Path $OutputDir "AgentsHub-v$Version-win-x64.zip"

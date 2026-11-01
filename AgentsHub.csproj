@@ -56,12 +56,30 @@
     <EmbeddedResource Remove="**\*.resx" />
   </ItemGroup>
 
+  <!-- Per-profile OAuth tokens are user data and must never be swept into a build output. -->
+  <ItemGroup>
+    <Content Remove="Profiles\**" />
+    <None Remove="Profiles\**" />
+    <EmbeddedResource Remove="Profiles\**" />
+  </ItemGroup>
+
   <!-- Separate project living under tools/. Its obj/ output would otherwise be globbed into this
        build and produce duplicate assembly attributes. -->
   <ItemGroup>
     <Compile Remove="tools\**\*.cs" />
     <None Remove="tools\**" />
     <EmbeddedResource Remove="tools\**" />
+  </ItemGroup>
+
+  <!-- The regression tests are their own project and must not compile into the app. -->
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <None Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentsHub.Security.Tests" />
   </ItemGroup>
 
   <!-- تفعيل خصائص الـ Trimming و SingleFile فقط أثناء الـ Publish ليبقى المصمم يعمل بسلاسة -->

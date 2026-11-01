@@ -78,7 +78,6 @@ public sealed partial class DashboardWebBridge : IDisposable
     private readonly SemaphoreSlim _firewallGate = new(1, 1);
     private const int FirewallCacheMs = 20000;
 
-    // Smart Cooldown rate limiter for VPN quota reset (backend guard)
 
     // Cached so payload parsing does not allocate a new options instance on every message.
     private static readonly JsonSerializerOptions CaseInsensitiveJsonOptions = new() { PropertyNameCaseInsensitive = true };
@@ -498,7 +497,21 @@ public sealed partial class DashboardWebBridge : IDisposable
 #if WINDOWS
     private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
+        // Navigation is locked to the app origins, but a frame or a transient page must not be
+        // able to drive the action set either. The sender has to be the page this bridge belongs to.
+        if (!IsSelfOrigin(e.Source)) return;
+
         await HandleIncomingJsonAsync(e.WebMessageAsJson);
+    }
+
+    private bool IsSelfOrigin(string? source)
+    {
+        var page = _coreWebView?.Source;
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(page)) return false;
+
+        return Uri.TryCreate(source, UriKind.Absolute, out var from)
+            && Uri.TryCreate(page, UriKind.Absolute, out var current)
+            && string.Equals(from.GetLeftPart(UriPartial.Authority), current.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase);
     }
 #endif
 
@@ -1627,7 +1640,10 @@ public sealed partial class DashboardWebBridge : IDisposable
         int hubPort = _cliManager.HubService.Port;
         int lanProxyPort = _lanProxyService?.ListenPort ?? 9191;
         bool lanProxyRunning = _lanProxyService?.IsRunning ?? false;
-        string lanUrl = $"http://{lanIp}:{lanProxyPort}/";
+        string lanToken = _lanProxyService is { IsRunning: true } lan && !string.IsNullOrEmpty(lan.AccessToken)
+            ? $"?k={lan.AccessToken}"
+            : string.Empty;
+        string lanUrl = $"http://{lanIp}:{lanProxyPort}/{lanToken}";
         string qrBase64 = QrCodeHelper.GenerateQrCodeBase64(lanUrl);
         var runningPorts = GetRunningWebPorts(lanIp, hubPort, lanProxyPort);
 

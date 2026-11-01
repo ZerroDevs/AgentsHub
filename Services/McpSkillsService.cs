@@ -693,8 +693,43 @@ public sealed class McpSkillsService
         return list;
     }
 
+    /// <summary>
+    /// The bridge passes these paths through, so only a skill definition file is readable or
+    /// writable. Without this, the action was a general read/write primitive for any file path.
+    /// </summary>
+    private static bool IsSkillMarkdownPath(string skillPath)
+    {
+        if (string.IsNullOrWhiteSpace(skillPath)) return false;
+
+        string fileName = Path.GetFileName(skillPath);
+        return string.Equals(fileName, "SKILL.md", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(fileName, "SKILL.md.disabled", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A write is confined to a discovered skill root. The filename check alone still allows a path
+    /// such as `.agents/skills/../../target/SKILL.md`, which resolves outside the root.
+    /// </summary>
+    private static bool IsInsideSkillsRoot(string skillPath)
+    {
+        string normalized;
+        try
+        {
+            normalized = Path.GetFullPath(skillPath).Replace('\\', '/');
+        }
+        catch
+        {
+            return false;
+        }
+
+        return normalized.Contains("/.agents/skills/", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("/.gemini/skills/", StringComparison.OrdinalIgnoreCase);
+    }
+
     public async Task<(string content, string name, string description, string scope, int tokenCount)> GetSkillContentAsync(string skillPath)
     {
+        if (!IsSkillMarkdownPath(skillPath)) return (string.Empty, string.Empty, string.Empty, "Project", 0);
+
         if (!File.Exists(skillPath))
             return (string.Empty, string.Empty, string.Empty, "Builtin", 0);
 
@@ -735,6 +770,8 @@ public sealed class McpSkillsService
 
     public async Task<bool> SaveSkillContentAsync(string skillPath, string name, string description, string content)
     {
+        if (!IsSkillMarkdownPath(skillPath)) return false;
+        if (!IsInsideSkillsRoot(skillPath)) return false;
         if (skillPath.Contains("builtin", StringComparison.OrdinalIgnoreCase))
             return false; // Builtin skills are immutable
 
@@ -888,11 +925,17 @@ public sealed class McpSkillsService
         var skillDir = Path.GetDirectoryName(skillPath);
         if (string.IsNullOrEmpty(skillDir) || !Directory.Exists(skillDir)) return false;
 
-        if (!skillDir.Replace('\\', '/').Contains("/.agents/skills/")) return false;
+        // Resolve first: a path built with `..` still contains the marker above, but points
+        // somewhere else entirely once the filesystem resolves it.
+        string fullDir = Path.GetFullPath(skillDir);
+        string marker = fullDir.Replace('\\', '/');
+        if (!marker.Contains("/.agents/skills/") && !marker.Contains("/.gemini/skills/")) return false;
+        if (!File.Exists(Path.Combine(fullDir, "SKILL.md")) && !File.Exists(Path.Combine(fullDir, "SKILL.md.disabled")))
+            return false;
 
         try
         {
-            Directory.Delete(skillDir, true);
+            Directory.Delete(fullDir, true);
             return true;
         }
         catch

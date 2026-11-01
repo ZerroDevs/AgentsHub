@@ -11,7 +11,7 @@ namespace AgentsHub.Services;
 
 /// <summary>
 /// Manages isolated multi-account profiles for Antigravity CLI without touching antigravity-ide.
-/// Profiles are saved in AppDomain.CurrentDomain.BaseDirectory\Profiles\Antigravity\{ProfileName}.
+/// Profiles are saved under %LOCALAPPDATA%\AgentsHub\Profiles\Antigravity\{ProfileName}.
 /// </summary>
 public sealed class AntigravityProfileService : IDisposable
 {
@@ -103,7 +103,7 @@ public sealed class AntigravityProfileService : IDisposable
         }
     }
 
-    public static string ProfilesBaseDir => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Profiles", "Antigravity");
+    public static string ProfilesBaseDir => Helpers.AppPaths.AntigravityProfilesDir;
 
     public event Action<string>? ActiveProfileChanged;
     public event Action<string>? ProfileSaved;
@@ -122,6 +122,7 @@ public sealed class AntigravityProfileService : IDisposable
 
     public AntigravityProfileService()
     {
+        Helpers.AppPaths.MigrateLegacyAntigravityProfiles();
         EnsureProfilesDirectoryExists();
 
         var saved = StartupHelper.GetStringPreference(PrefActiveProfileKey, string.Empty);
@@ -596,7 +597,7 @@ public sealed class AntigravityProfileService : IDisposable
     /// </summary>
     public bool ExportCurrentSession(string profileName)
     {
-        if (string.IsNullOrWhiteSpace(profileName)) return false;
+        if (!IsSafeProfileName(profileName)) return false;
 
         lock (_lock)
         {
@@ -780,7 +781,7 @@ public sealed class AntigravityProfileService : IDisposable
     /// </summary>
     public bool ApplyProfile(string profileName)
     {
-        if (string.IsNullOrWhiteSpace(profileName)) return false;
+        if (!IsSafeProfileName(profileName)) return false;
 
         lock (_lock)
         {
@@ -926,6 +927,7 @@ public sealed class AntigravityProfileService : IDisposable
     {
         if (string.IsNullOrWhiteSpace(newProfileName)) return false;
         newProfileName = SanitizeProfileName(newProfileName);
+        if (!IsSafeProfileName(newProfileName)) return false;
 
         lock (_lock)
         {
@@ -995,6 +997,7 @@ public sealed class AntigravityProfileService : IDisposable
         oldName = oldName.Trim();
         newName = SanitizeProfileName(newName);
 
+        if (!IsSafeProfileName(oldName) || !IsSafeProfileName(newName)) return false;
         if (string.Equals(oldName, newName, StringComparison.OrdinalIgnoreCase)) return true;
 
         lock (_lock)
@@ -1062,7 +1065,7 @@ public sealed class AntigravityProfileService : IDisposable
     /// </summary>
     public bool DeleteProfile(string profileName)
     {
-        if (string.IsNullOrWhiteSpace(profileName)) return false;
+        if (!IsSafeProfileName(profileName)) return false;
 
         lock (_lock)
         {
@@ -1841,12 +1844,38 @@ public sealed class AntigravityProfileService : IDisposable
         return null;
     }
 
-    private static string SanitizeProfileName(string name)
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
+    /// <summary>
+    /// Turns a display name into one path segment. Dots are the part that matters: a name of
+    /// ".." passes an invalid-character check but points the profile folder at its parent.
+    /// </summary>
+    internal static string SanitizeProfileName(string name)
     {
         var invalids = Path.GetInvalidFileNameChars();
-        var chars = name.Select(c => invalids.Contains(c) ? '_' : c).ToArray();
-        var clean = new string(chars).Trim();
-        return string.IsNullOrWhiteSpace(clean) ? "Profile" : clean;
+        var chars = name.Select(c => invalids.Contains(c) || char.IsControl(c) ? '_' : c).ToArray();
+        var clean = new string(chars).Trim().TrimEnd('.', ' ');
+
+        if (string.IsNullOrWhiteSpace(clean)) return "Profile";
+
+        string stem = clean.Split('.')[0];
+        if (ReservedDeviceNames.Contains(stem)) clean = "_" + clean;
+
+        return clean.Length > 64 ? clean[..64].TrimEnd('.', ' ') : clean;
+    }
+
+    /// <summary>Rejects a name that is not exactly one safe directory segment.</summary>
+    internal static bool IsSafeProfileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name is "." or "..") return false;
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
+        if (name.Length > 64) return false;
+        return string.Equals(name, SanitizeProfileName(name), StringComparison.Ordinal);
     }
 
     private void Log(string msg)

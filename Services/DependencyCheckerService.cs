@@ -359,7 +359,7 @@ public static class DependencyCheckerService
         bool probeAllowed = path.Length > 0 && !IsGuiLauncher(definition, path);
         string version = probeAllowed ? ProbeVersion(path) : "";
 
-        // GUI installs keep their version in the folder name (…\VPN\v5.1.8\…), so fall back to it.
+        // GUI installs keep their version in the folder name (…\App\v5.1.8\…), so fall back to it.
         if (version.Length == 0 && path.Length > 0)
         {
             version = ExtractVersion(path.Replace('\\', ' ').Replace('/', ' '));

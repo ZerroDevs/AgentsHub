@@ -420,8 +420,11 @@
 
     // Apply saved theme immediately from URL params, server-injected globals, or localStorage
     const urlParams = new URLSearchParams(window.location.search);
-    const queryTheme = urlParams.get('theme');
-    const queryAccent = urlParams.get('accent');
+    const hexPattern = /^#[0-9a-f]{6}$/i;
+    const rawTheme = urlParams.get('theme');
+    const rawAccent = urlParams.get('accent') || '';
+    const queryTheme = rawTheme === 'light' || rawTheme === 'dark' ? rawTheme : null;
+    const queryAccent = hexPattern.test(rawAccent) ? rawAccent : null;
     if (queryTheme) localStorage.setItem('agents_hub_theme', queryTheme);
     if (queryAccent) localStorage.setItem('agents_hub_accent_color', queryAccent);
 
@@ -443,7 +446,8 @@
       // Real Browser Mode via WebSocket
       function connectWebSocket() {
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        socket = new WebSocket(`${wsProto}//${location.host}/ws`);
+        const token = window.__TERMINAL_TOKEN__ || urlParams.get('token') || '';
+        socket = new WebSocket(`${wsProto}//${location.host}/ws?token=${encodeURIComponent(token)}`);
 
         socket.onopen = () => {
           sendHostMessage({

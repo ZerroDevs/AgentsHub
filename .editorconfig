@@ -66,7 +66,7 @@ dotnet_diagnostic.IDE0031.severity = suggestion
 #                    against the native signature.
 #   CA1869    ( 5)   Cache JsonSerializerOptions instead of allocating per call.
 #   CA1822    ( 4)   Make members static where they use no instance state. DashboardWebBridge's
-#                    FocusOpenCodeSession is done; the rest are in ProtonVpnService, MainForm and
+#                    FocusOpenCodeSession is done; the rest are in MainForm and
 #                    AntigravityProfileService.
 #   SYSLIB1045 ( 1)  Use GeneratedRegex.
 #

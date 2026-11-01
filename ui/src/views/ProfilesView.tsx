@@ -694,7 +694,7 @@ export const ProfilesView: React.FC<ProfilesViewProps> = () => {
                             </span>
                             <span className="px-1.5 py-0.5 rounded bg-surface-card border border-surface-border flex items-center gap-1">
                               <Layers className="w-2.5 h-2.5 text-content-muted" />
-                              <span>{ws.primaryCli === 'Hermes' || ws.primaryCli === 'Hub' || !ws.primaryCli ? 'Default engine' : ws.primaryCli}</span>
+                              <span>{ws.primaryCli === 'Hub' || !ws.primaryCli ? 'Default engine' : ws.primaryCli}</span>
                             </span>
                           </div>
                         </div>

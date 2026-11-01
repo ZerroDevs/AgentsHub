@@ -181,7 +181,8 @@ public class SidecarManager : IDisposable
         // The sidecar's cwd is the binary's own folder, so it cannot find the profile store by
         // guessing relative paths — it used to invent bin\win-x64\bin\Debug\...\Profiles and run
         // `agy` against an empty home, while the host wrote settings to the real one.
-        startInfo.Environment["AGENTS_PROFILES_DIR"] = Path.Combine(AppContext.BaseDirectory, "Profiles", "Antigravity");
+        Helpers.AppPaths.MigrateLegacyAntigravityProfiles();
+        startInfo.Environment["AGENTS_PROFILES_DIR"] = Helpers.AppPaths.AntigravityProfilesDir;
 
         ProcessSpawnLog.Record(startInfo.FileName, startInfo.Arguments, startInfo);
         var proc = new Process { StartInfo = startInfo, EnableRaisingEvents = true };

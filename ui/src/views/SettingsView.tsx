@@ -1267,7 +1267,7 @@ export const SettingsView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Group 2: AI Agents & VPN Utilities */}
+                {/* Group 2: AI Agents & Network Tools */}
                 <div className="space-y-2 pt-3 border-t border-[var(--border-subtle,#1E293B)]">
                   <div>
                     <div className="text-xs font-semibold text-state-success">2. AI Agents & Network Tools</div>

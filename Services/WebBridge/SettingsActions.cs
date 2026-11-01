@@ -182,6 +182,12 @@ public sealed partial class DashboardWebBridge : IDisposable
             return Task.CompletedTask;
         }
 
+        if (!UpdateService.IsTrustedReleaseUrl(dlUrl))
+        {
+            SendResponse(requestId, false, "Refusing to install from an untrusted URL.");
+            return Task.CompletedTask;
+        }
+
         SendResponse(requestId, true, new { status = "downloading" });
 
         var progress = new Progress<double>(p =>
@@ -1254,7 +1260,9 @@ public sealed partial class DashboardWebBridge : IDisposable
         if (data.TryGetProperty("url", out var urlProp))
         {
             var targetUrl = urlProp.GetString();
-            if (!string.IsNullOrWhiteSpace(targetUrl))
+            if (!string.IsNullOrWhiteSpace(targetUrl)
+                && (targetUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                    || targetUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase)))
             {
                 if (targetUrl.Contains(":9119") || targetUrl.Contains(":9191"))
                 {
