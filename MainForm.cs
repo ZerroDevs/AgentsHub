@@ -50,6 +50,9 @@ public partial class MainForm : Form
     private bool _isExiting;
     private Icon? _appIcon;
     private Icon? _trayIcon;
+    private Icon? _trayRunningIcon;
+    private Icon? _trayWarnIcon;
+    private Icon? _trayOfflineIcon;
     private MiniBarForm? _miniBarForm;
     private const int HotkeyMiniBarId = 9193;
     private bool _miniBarHotkeyRegistered;
@@ -397,13 +400,10 @@ public partial class MainForm : Form
         ApplyTrayTheme();
 
         // The blue tile disappears against a dark taskbar, so the tray takes the flat white mark.
-        try
-        {
-            var trayIconPath = Path.Combine(AppContext.BaseDirectory, "assets", "tray.ico");
-            if (File.Exists(trayIconPath))
-                _trayIcon = new Icon(trayIconPath, SystemInformation.SmallIconSize);
-        }
-        catch { }
+        _trayIcon = LoadTrayIcon("tray.ico");
+        _trayRunningIcon = LoadTrayIcon("tray-running.ico");
+        _trayWarnIcon = LoadTrayIcon("tray-warn.ico");
+        _trayOfflineIcon = LoadTrayIcon("tray-offline.ico");
 
         _notifyIcon = new NotifyIcon
         {
@@ -412,6 +412,17 @@ public partial class MainForm : Form
             ContextMenuStrip = _trayContextMenu,
             Visible = true
         };
+
+        if (_cliManager != null)
+        {
+            UpdateTrayState(_cliManager.GetInfo(CliType.Hub).State);
+
+            _cliManager.StatusChanged += (type, state, _) =>
+            {
+                if (type != CliType.Hub || IsDisposed || !IsHandleCreated) return;
+                BeginInvoke(new Action(() => UpdateTrayState(state)));
+            };
+        }
 
         _notifyIcon.DoubleClick += (_, _) => ShowAndActivate();
     }
@@ -649,6 +660,37 @@ public partial class MainForm : Form
         {
             ShowTrayBalloon("Agents Hub", $"Update check failed: {ex.Message}");
         }
+    }
+
+    private static Icon? LoadTrayIcon(string fileName)
+    {
+        try
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, "assets", fileName);
+            return File.Exists(path) ? new Icon(path, SystemInformation.SmallIconSize) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// One dot in the tray for the hub state, so the app says whether the engine is serving without
+    /// opening the menu. Starting and Error share the warning dot: neither is a working hub yet.
+    /// </summary>
+    private void UpdateTrayState(CliState state)
+    {
+        if (_notifyIcon == null) return;
+
+        Icon? icon = state switch
+        {
+            CliState.Running => _trayRunningIcon,
+            CliState.Starting or CliState.Error => _trayWarnIcon,
+            _ => _trayOfflineIcon
+        };
+
+        _notifyIcon.Icon = icon ?? _trayIcon ?? _appIcon ?? SystemIcons.Application;
     }
 
     private void ApplyTrayTheme()

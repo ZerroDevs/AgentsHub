@@ -83,12 +83,34 @@ def square(img, size):
     return plate.resize((size, size), Image.LANCZOS)
 
 
+ICO_SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
+
+# fileName -> dot colour. The tray answers "is the hub up" without opening the menu.
+TRAY_STATES = {
+    "tray-running.ico": (34, 197, 94),
+    "tray-warn.ico": (245, 158, 11),
+    "tray-offline.ico": (239, 68, 68),
+}
+
+
 def save_ico(png_path, ico_path):
     """A tray icon needs every small size RGBa-crisp, not one bitmap scaled by Windows."""
     src = Image.open(png_path).convert("RGBA")
     base = square(src, 256)
-    base.save(ico_path, sizes=[(s, s) for s in (16, 20, 24, 32, 48, 64, 128, 256)])
+    base.save(ico_path, sizes=[(s, s) for s in ICO_SIZES])
     print(f"ico  {ico_path} from {png_path}")
+
+
+def save_state_ico(png_path, ico_path, colour):
+    """The same mark with one dot in the bottom-right corner, ringed in ink so it reads at 16 px."""
+    base = square(Image.open(png_path).convert("RGBA"), 256)
+    draw = ImageDraw.Draw(base)
+    dot, margin, ring = 86, 6, 10
+    x1 = 256 - dot - margin
+    draw.ellipse((x1 - ring, x1 - ring, x1 + dot + ring - 1, x1 + dot + ring - 1), fill=(11, 32, 48, 255))
+    draw.ellipse((x1, x1, x1 + dot - 1, x1 + dot - 1), fill=(*colour, 255))
+    base.save(ico_path, sizes=[(s, s) for s in ICO_SIZES])
+    print(f"ico  {ico_path} {colour}")
 
 
 def contact_sheet(items, path):
@@ -132,6 +154,8 @@ def main():
     white = os.path.join(UI, "brand", "logo-white.png")
     if os.path.exists(white):
         save_ico(white, "assets/tray.ico")
+        for name, colour in TRAY_STATES.items():
+            save_state_ico(white, os.path.join("assets", name), colour)
 
     contact_sheet(made, "assets/icons/review/new2.png")
 

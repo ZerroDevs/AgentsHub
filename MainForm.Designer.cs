@@ -17,6 +17,9 @@ partial class MainForm
             _trayContextMenu?.Dispose();
             _appIcon?.Dispose();
             _trayIcon?.Dispose();
+            _trayRunningIcon?.Dispose();
+            _trayWarnIcon?.Dispose();
+            _trayOfflineIcon?.Dispose();
         }
         base.Dispose(disposing);
     }
