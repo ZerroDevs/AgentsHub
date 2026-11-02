@@ -1191,7 +1191,7 @@ public sealed partial class DashboardWebBridge : IDisposable
         {
             enabled,
             bridgeRunning = Services.ClaudeOpenRouterProxyService.Instance.IsRunning,
-            ports = new[] { 9230, 9229, 9339 }
+            ports = new[] { 9230, 9229, 9349 }
         });
 
         return Task.CompletedTask;
@@ -1226,7 +1226,7 @@ public sealed partial class DashboardWebBridge : IDisposable
             try { bridge.Start(Services.ClaudeOpenRouterProxyService.DefaultPort); } catch { }
             try { _cliManager.WebTerminalServer.EnsureDefaultEndpoints(); } catch { }
 
-            EmitLog("Bridge", "info", "Background ports on: 9230 (bridge), 9229 and 9339 (CLI terminal pages).");
+            EmitLog("Bridge", "info", "Background ports on: 9230 (bridge), 9229 and 9349 (CLI terminal pages).");
             return;
         }
 
@@ -1526,7 +1526,7 @@ public sealed partial class DashboardWebBridge : IDisposable
                     localTarget = localTarget.Replace(lanIp, "127.0.0.1");
                 }
 
-                if (!localTarget.Contains("theme=") && (localTarget.Contains(":9229") || localTarget.Contains(":9339") || localTarget.Contains(":9191") || localTarget.Contains(":9119")))
+                if (!localTarget.Contains("theme=") && (localTarget.Contains(":9229") || localTarget.Contains(":9349") || localTarget.Contains(":9339") || localTarget.Contains(":9191") || localTarget.Contains(":9119")))
                 {
                     string sep = localTarget.Contains('?') ? "&" : "?";
                     string themeParam = $"theme={(ThemeManager.CurrentTheme == AppTheme.Light ? "light" : "dark")}&accent={Uri.EscapeDataString(ThemeManager.AccentHex)}";
@@ -2257,6 +2257,9 @@ public sealed partial class DashboardWebBridge : IDisposable
         string Text(string name, string fallback) =>
             data.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String ? el.GetString() ?? fallback : fallback;
 
+        double Number(string name, double fallback) =>
+            data.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.Number ? el.GetDouble() : fallback;
+
         var wanted = new Services.LlamaCpp.LlamaRuntimeOptions(
             ContextSize: Int("contextSize", current.ContextSize),
             GpuLayers: Int("gpuLayers", current.GpuLayers),
@@ -2265,7 +2268,9 @@ public sealed partial class DashboardWebBridge : IDisposable
             CacheTypeK: Text("cacheTypeK", current.CacheTypeK),
             CacheTypeV: Text("cacheTypeV", current.CacheTypeV),
             FlashAttention: !data.TryGetProperty("flashAttention", out var fa) || fa.ValueKind != JsonValueKind.False,
-            ExtraArgs: Text("extraArgs", current.ExtraArgs));
+            ExtraArgs: Text("extraArgs", current.ExtraArgs),
+            Temperature: Number("temperature", current.Temperature),
+            MaxTokens: Int("maxTokens", current.MaxTokens));
 
         bool changed = service.SetRuntimeOptions(wanted);
         var after = service.Runtime;
@@ -2273,7 +2278,8 @@ public sealed partial class DashboardWebBridge : IDisposable
         EmitLog("llama.cpp", "info",
             $"Server flags: context {after.ContextSize}, GPU layers {after.GpuLayers}, threads " +
             $"{(after.Threads > 0 ? after.Threads.ToString() : "auto")}, batch {after.BatchSize}, " +
-            $"cache {after.CacheTypeK}/{after.CacheTypeV}, flash attention {(after.FlashAttention ? "on" : "off")}" +
+            $"cache {after.CacheTypeK}/{after.CacheTypeV}, flash attention {(after.FlashAttention ? "on" : "off")}, " +
+            $"temperature {after.Temperature}, max tokens {after.MaxTokens}" +
             (after.ExtraArgs.Length > 0 ? $", extra: {after.ExtraArgs}" : string.Empty));
 
         SendResponse(requestId, true, new { changed, runtime = after, status = ToLlamaCppDto(service.Status()) });
@@ -2303,8 +2309,32 @@ public sealed partial class DashboardWebBridge : IDisposable
             cacheTypeK = status.Runtime.CacheTypeK,
             cacheTypeV = status.Runtime.CacheTypeV,
             flashAttention = status.Runtime.FlashAttention,
-            extraArgs = status.Runtime.ExtraArgs
-        }
+            extraArgs = status.Runtime.ExtraArgs,
+            temperature = status.Runtime.Temperature,
+            maxTokens = status.Runtime.MaxTokens
+        },
+        idleUnloadMinutes = status.IdleUnloadMinutes,
+        unloadInSeconds = status.UnloadInSeconds
     };
+
+    /// <summary>Idle unload for the local server. Zero keeps the model loaded until the app closes.</summary>
+    private Task HandleLlamaCppSetIdleAsync(JsonElement data, string? requestId)
+    {
+        int minutes = data.TryGetProperty("minutes", out var el) && el.ValueKind == JsonValueKind.Number ? el.GetInt32() : 0;
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        service.SetIdleUnloadMinutes(minutes);
+
+        EmitLog("llama.cpp", "info", service.IdleUnloadMinutes > 0
+            ? $"The local model unloads after {service.IdleUnloadMinutes} idle minutes."
+            : "The local model stays loaded until the app closes.");
+
+        SendResponse(requestId, true, new
+        {
+            idleUnloadMinutes = service.IdleUnloadMinutes,
+            status = ToLlamaCppDto(service.Status())
+        });
+
+        return Task.CompletedTask;
+    }
 
 }

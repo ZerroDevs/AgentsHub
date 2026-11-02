@@ -30,6 +30,9 @@ export interface AppSettings {
   embedShellsInTerminalWorkspace: boolean;
   hideMainOnCliOpen: boolean;
   enableHardwareMonitor: boolean;
+  /** Written by the theme store; the host keeps these beside the other preferences. */
+  theme: string;
+  accentColor: string;
 }
 
 export interface EngineHealthItem {
@@ -260,6 +263,8 @@ interface SettingsStoreState {
   setActiveSettingsCategory: (cat: string) => void;
   setSearchQuery: (query: string) => void;
   updateSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
+  /** Reads the preferences the host actually stored. Safe to call from several places. */
+  loadGeneralSettings: () => Promise<void>;
   saveGeneralSettings: () => Promise<void>;
   
   // Dependencies actions
@@ -356,6 +361,8 @@ const defaultSettings: AppSettings = {
   embedShellsInTerminalWorkspace: true,
   hideMainOnCliOpen: false,
   enableHardwareMonitor: false,
+  theme: 'dark',
+  accentColor: '#4049B9',
 };
 
 // Deliberately empty. This used to hold a hardcoded sample list, which is why removed tools kept
@@ -368,6 +375,20 @@ const defaultDiagnostics: DiagnosticItem[] = [];
 
 // Module-level so the debounce survives re-renders.
 let autoSaveTimer: number | null = null;
+
+/**
+ * The one in-flight (or finished) read of the host's preferences, and whether it succeeded.
+ *
+ * The store used to start from hardcoded defaults and only read the host when Settings was opened, so
+ * anything that saved before that — the theme store, a toggle on a page that was already open — posted
+ * the defaults over the stored values. One shared promise also means two views asking cannot fire two
+ * requests.
+ */
+let settingsLoad: Promise<void> | null = null;
+let settingsLoaded = false;
+
+/** Keys the person already changed in this run, which the host's older value must not overwrite. */
+const settingsTouched = new Set<string>();
 
 export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
   settings: defaultSettings,
@@ -482,6 +503,8 @@ export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
   setSearchQuery: query => set({ searchQuery: query }),
 
   updateSetting: (key, value) => {
+    settingsTouched.add(key);
+
     set(state => {
       const updated = { ...state.settings, [key]: value };
       return { settings: updated };
@@ -497,7 +520,35 @@ export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
     }, 600);
   },
 
+  loadGeneralSettings: async () => {
+    settingsLoad ??= (async () => {
+      try {
+        const res: any = await webviewBridge.invoke('get_initial_state');
+        if (res?.settings) {
+          // A change made while this request was in flight keeps its value: the answer describes the
+          // host as it was before that click.
+          const patch = Object.fromEntries(
+            Object.entries(res.settings).filter(([key]) => !settingsTouched.has(key))
+          );
+
+          set(state => ({ settings: { ...state.settings, ...patch } }));
+          settingsLoaded = true;
+        }
+      } catch {
+        // Keep the defaults rather than blanking the page if the host cannot answer, and let the next
+        // call try again instead of caching the failure.
+        settingsLoad = null;
+      }
+    })();
+
+    await settingsLoad;
+  },
+
   saveGeneralSettings: async () => {
+    // A save before the host has been read would post this page's defaults over every stored
+    // preference, which is how flipping one switch used to reset the rest.
+    if (!settingsLoaded) await get().loadGeneralSettings();
+
     try {
       // The bridge action is `save_general_settings`; `save_settings` was never implemented, so every
       // save failed and the catch reported success anyway — preferences reset on the next launch.

@@ -21,7 +21,15 @@ public sealed record LocalToolStep(
     string? Summary);
 
 /// <summary>What one direct local turn produced.</summary>
-public sealed record LocalChatTurn(string Answer, string ConversationId, int TokensIn, int TokensOut);
+public sealed record LocalChatTurn(
+    string Answer,
+    string ConversationId,
+    int TokensIn,
+    int TokensOut,
+    double TokensPerSecond);
+
+/// <summary>One message in a local conversation, so the thread can be written to disk as it stands.</summary>
+internal sealed record LocalMessage(string Role, string Content);
 
 /// <summary>
 /// A local chat with no Claude Code in the middle.
@@ -48,8 +56,11 @@ public sealed class LocalChatEngine
 
     private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
 
+    private static readonly string ThreadFolder = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AgentsHub", "local_chats");
+
     private readonly SemaphoreSlim _turn = new(1, 1);
-    private readonly ConcurrentDictionary<string, List<(string Role, string Content)>> _threads = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, List<LocalMessage>> _threads = new(StringComparer.Ordinal);
 
     private CancellationTokenSource? _cts;
 
@@ -69,8 +80,21 @@ public sealed class LocalChatEngine
         }
     }
 
-    /// <summary>Forgets a conversation. A new chat should not inherit the old one's files.</summary>
-    public void Forget(string conversationId) => _threads.TryRemove(conversationId, out _);
+    /// <summary>Forgets a conversation, on disk as well. A new chat should not inherit the old one's files.</summary>
+    public void Forget(string conversationId)
+    {
+        _threads.TryRemove(conversationId, out _);
+
+        try
+        {
+            string path = ThreadFile(conversationId);
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // A conversation nobody can load again is not worth failing a request over.
+        }
+    }
 
     public async Task<LocalChatTurn> SendAsync(
         string prompt,
@@ -90,6 +114,9 @@ public sealed class LocalChatEngine
         _cts = linked;
         Stopped = false;
 
+        var service = LlamaCppService.Instance;
+        service.BeginRequest();
+
         try
         {
             // Asked of the endpoint rather than of this app's own process list: a server started by
@@ -98,7 +125,7 @@ public sealed class LocalChatEngine
             if (reachable.Length == 0)
             {
                 throw new InvalidOperationException(
-                    $"Nothing is answering at {LlamaCppService.Instance.Endpoint}. Load a model in Local models, " +
+                    $"Nothing is answering at {service.Endpoint}. Load a model in Local models, " +
                     "or turn on \u201cRun a local model automatically\u201d in Settings.");
             }
 
@@ -108,23 +135,30 @@ public sealed class LocalChatEngine
 
             string modelId = string.IsNullOrWhiteSpace(model) ? reachable : model.Trim();
 
-            var thread = _threads.GetOrAdd(id, _ => []);
-            thread.Add(("user", prompt));
+            var runtime = service.Runtime;
+            var thread = Thread(id);
+            thread.Add(new LocalMessage("user", prompt));
 
-            var pending = new List<(string Role, string Content)>();
+            var pending = new List<LocalMessage>();
             string answer = string.Empty;
             int tokensIn = 0;
             int tokensOut = 0;
+            double rate = 0;
 
             for (int step = 0; step < MaxSteps; step++)
             {
                 var messages = BuildMessages(root, thread, pending);
-                var streamed = await StreamAsync(modelId, messages, onText, onThinking, linked.Token).ConfigureAwait(false);
+                var streamed = await StreamAsync(modelId, messages, runtime.Temperature, runtime.MaxTokens, onText, onThinking, linked.Token)
+                    .ConfigureAwait(false);
 
-                tokensIn += streamed.TokensIn;
+                // The prompt is re-sent on every step, so adding the steps up would count the same
+                // history several times. The largest prompt is what the turn actually cost to read;
+                // generated tokens are new every step and do accumulate.
+                tokensIn = Math.Max(tokensIn, streamed.TokensIn);
                 tokensOut += streamed.TokensOut;
+                if (streamed.TokensPerSecond > 0) rate = streamed.TokensPerSecond;
 
-                pending.Add(("assistant", streamed.Text));
+                pending.Add(new LocalMessage("assistant", streamed.Text));
 
                 var calls = DeepSeekTools.Extract(streamed.Text);
                 if (calls.Count == 0)
@@ -168,7 +202,7 @@ public sealed class LocalChatEngine
                     }
                 }
 
-                pending.Add(("user", "TOOL RESULTS\n\n" + results.ToString().TrimEnd()));
+                pending.Add(new LocalMessage("user", "TOOL RESULTS\n\n" + results.ToString().TrimEnd()));
             }
 
             if (answer.Length == 0)
@@ -176,18 +210,75 @@ public sealed class LocalChatEngine
                 answer = "The model kept asking for tools and the turn was stopped after " + MaxSteps + " steps.";
             }
 
-            pending.Add(("assistant", answer));
+            pending.Add(new LocalMessage("assistant", answer));
             thread.AddRange(pending);
             Trim(thread);
+            Save(id, thread);
 
-            return new LocalChatTurn(answer, id, tokensIn, tokensOut);
+            return new LocalChatTurn(answer, id, tokensIn, tokensOut, rate);
         }
         finally
         {
+            service.EndRequest();
             _cts = null;
             _turn.Release();
             linked.Dispose();
         }
+    }
+
+    // ---- history on disk ----
+
+    /// <summary>
+    /// The conversation for an id, read from disk the first time it is asked for. Without this a
+    /// local chat started from scratch on every launch: the transcript in the page survived, the
+    /// model's own copy of it did not, so a resumed session answered as if it had never spoken.
+    /// </summary>
+    private List<LocalMessage> Thread(string id)
+    {
+        if (_threads.TryGetValue(id, out var known)) return known;
+
+        var loaded = new List<LocalMessage>();
+
+        try
+        {
+            string path = ThreadFile(id);
+            if (File.Exists(path))
+            {
+                var stored = JsonSerializer.Deserialize<List<LocalMessage>>(File.ReadAllText(path));
+                if (stored is { Count: > 0 }) loaded.AddRange(stored);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException)
+        {
+            // A damaged file starts a fresh conversation instead of failing the turn.
+        }
+
+        _threads[id] = loaded;
+        return loaded;
+    }
+
+    private static void Save(string id, List<LocalMessage> thread)
+    {
+        try
+        {
+            string path = ThreadFile(id);
+            string? directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+
+            File.WriteAllText(path, JsonSerializer.Serialize(thread));
+        }
+        catch (IOException)
+        {
+            // Persistence is a convenience; the turn already answered.
+        }
+    }
+
+    private static string ThreadFile(string id)
+    {
+        string safe = new([.. id.Where(c => char.IsLetterOrDigit(c) || c is '-' or '_')]);
+        if (safe.Length == 0) safe = "local";
+
+        return Path.Combine(ThreadFolder, safe + ".json");
     }
 
     /// <summary>
@@ -197,8 +288,8 @@ public sealed class LocalChatEngine
     /// </summary>
     private static List<object> BuildMessages(
         string root,
-        List<(string Role, string Content)> thread,
-        List<(string Role, string Content)> pending)
+        List<LocalMessage> thread,
+        List<LocalMessage> pending)
     {
         IReadOnlyList<SkillEntry> skills;
         IReadOnlyList<McpToolInfo>? mcp = null;
@@ -214,21 +305,16 @@ public sealed class LocalChatEngine
             new { role = "system", content = DeepSeekTools.Guide(root, skills, mcp) }
         };
 
-        foreach (var (role, content) in thread)
+        foreach (var message in thread.Concat(pending))
         {
-            if (content.Length > 0) messages.Add(new { role, content });
-        }
-
-        foreach (var (role, content) in pending)
-        {
-            if (content.Length > 0) messages.Add(new { role, content });
+            if (message.Content.Length > 0) messages.Add(new { role = message.Role, content = message.Content });
         }
 
         return messages;
     }
 
     /// <summary>Drops the oldest exchanges until the conversation fits the budget below the context.</summary>
-    private static void Trim(List<(string Role, string Content)> thread)
+    private static void Trim(List<LocalMessage> thread)
     {
         int total = thread.Sum(m => m.Content.Length);
 
@@ -239,7 +325,7 @@ public sealed class LocalChatEngine
         }
     }
 
-    private sealed record StreamResult(string Text, int TokensIn, int TokensOut);
+    private sealed record StreamResult(string Text, int TokensIn, int TokensOut, double TokensPerSecond);
 
     /// <summary>
     /// One streamed completion. Text and reasoning are reported as they arrive: llama.cpp sends
@@ -249,6 +335,8 @@ public sealed class LocalChatEngine
     private static async Task<StreamResult> StreamAsync(
         string model,
         List<object> messages,
+        double temperature,
+        int maxTokens,
         IProgress<string>? onText,
         Action<string>? onThinking,
         CancellationToken ct)
@@ -258,8 +346,11 @@ public sealed class LocalChatEngine
             ["model"] = model,
             ["messages"] = messages,
             ["stream"] = true,
-            ["temperature"] = 0.7,
-            ["max_tokens"] = 4096,
+            ["temperature"] = temperature,
+            ["max_tokens"] = maxTokens,
+            // Asks the server to end the stream with a usage chunk, which is where the real token
+            // counts come from. A build that does not know the option ignores it.
+            ["stream_options"] = new Dictionary<string, object> { ["include_usage"] = true },
             // Qwen and friends keep thinking off unless the template is told; a template without the
             // variable ignores it.
             ["chat_template_kwargs"] = new Dictionary<string, object> { ["enable_thinking"] = true }
@@ -280,6 +371,7 @@ public sealed class LocalChatEngine
         var thinking = new StringBuilder();
         int tokensIn = 0;
         int tokensOut = 0;
+        double rate = 0;
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8);
@@ -300,10 +392,19 @@ public sealed class LocalChatEngine
             {
                 var root = doc.RootElement;
 
-                if (root.TryGetProperty("usage", out var usage))
+                if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
                 {
                     if (usage.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number) tokensIn = pt.GetInt32();
                     if (usage.TryGetProperty("completion_tokens", out var ctout) && ctout.ValueKind == JsonValueKind.Number) tokensOut = ctout.GetInt32();
+                }
+
+                // llama.cpp reports its own measured speed for the request. Taking it here means the
+                // readout is right even when the server's log lines are not being watched.
+                if (root.TryGetProperty("timings", out var timings) && timings.ValueKind == JsonValueKind.Object)
+                {
+                    if (timings.TryGetProperty("predicted_per_second", out var pps) && pps.ValueKind == JsonValueKind.Number) rate = pps.GetDouble();
+                    if (timings.TryGetProperty("predicted_n", out var pn) && pn.ValueKind == JsonValueKind.Number && pn.GetInt32() > 0) tokensOut = pn.GetInt32();
+                    if (timings.TryGetProperty("prompt_n", out var ppn) && ppn.ValueKind == JsonValueKind.Number && ppn.GetInt32() > 0) tokensIn = ppn.GetInt32();
                 }
 
                 if (root.TryGetProperty("error", out var error))
@@ -361,7 +462,7 @@ public sealed class LocalChatEngine
             }
         }
 
-        return new StreamResult(answer, tokensIn, tokensOut);
+        return new StreamResult(answer, tokensIn, tokensOut, rate);
     }
 
     /// <summary>Splits `… content` into the visible answer and the thought it carried.</summary>

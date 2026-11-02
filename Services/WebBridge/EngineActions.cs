@@ -738,6 +738,39 @@ public sealed partial class DashboardWebBridge : IDisposable
                 });
             }
 
+            // The counts llama.cpp reported for the turn. The page already knows the token_usage event
+            // from the engine sidecar, so the composer's readout works for a local model too — it used
+            // to stay empty because nothing posted any usage here.
+            if (turn.TokensIn > 0 || turn.TokensOut > 0)
+            {
+                PostEventToUi("token_usage", new
+                {
+                    sessionId,
+                    usage = new
+                    {
+                        inputTokens = turn.TokensIn,
+                        outputTokens = turn.TokensOut,
+                        thinkingTokens = 0,
+                        totalTokens = turn.TokensIn + turn.TokensOut
+                    },
+                    timestamp = Now(),
+                });
+            }
+
+            // The request's own timing, so the speed appears the moment the reply ends instead of
+            // waiting for the server's log line to be read.
+            if (turn.TokensPerSecond > 0)
+            {
+                PostEventToUi("local_model_rate", new
+                {
+                    sessionId,
+                    tokensPerSecond = Math.Round(turn.TokensPerSecond, 1),
+                    generatedTokens = turn.TokensOut,
+                    streaming = false,
+                    estimated = false
+                });
+            }
+
             PostEventToUi("chat_final", new { sessionId, text = turn.Answer, timestamp = Now() });
             PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
         }

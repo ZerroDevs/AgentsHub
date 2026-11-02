@@ -1455,6 +1455,10 @@ public sealed partial class DashboardWebBridge : IDisposable
                 HandleLlamaCppSetRunner(data, requestId);
                 break;
 
+            case "llamacpp_set_idle":
+                await HandleLlamaCppSetIdleAsync(data, requestId).ConfigureAwait(false);
+                break;
+
             case "background_ports_get":
                 await HandleBackgroundPortsGetAsync(requestId).ConfigureAwait(false);
                 break;
@@ -1733,6 +1737,13 @@ public sealed partial class DashboardWebBridge : IDisposable
                 break;
 
             case "save_general_settings":
+                await HandleSaveGeneralSettingsAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            // The theme store has always posted its theme and accent here. Without the alias every
+            // change resolved as an unknown action, so the registry kept the old theme while the page
+            // showed the new one. Same handler: it only touches the fields the payload carries.
+            case "save_settings":
                 await HandleSaveGeneralSettingsAsync(data, requestId).ConfigureAwait(false);
                 break;
 

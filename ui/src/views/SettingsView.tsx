@@ -111,6 +111,8 @@ export const SettingsView: React.FC = () => {
     cacheTypeV: string;
     flashAttention: boolean;
     extraArgs: string;
+    temperature: number;
+    maxTokens: number;
   } | null>(null);
   /** `direct` (streamed here) or `claude` (through the Claude Code CLI). */
   const [llamaRunner, setLlamaRunner] = useState<string>('direct');
@@ -226,6 +228,16 @@ export const SettingsView: React.FC = () => {
     }
   };
 
+  /** Idle unload is a runtime behaviour, not a launch flag: it applies to a server already running. */
+  const setLlamaIdle = async (minutes: number) => {
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_set_idle', { minutes });
+      if (res?.status) setLlama(res.status);
+    } catch {
+      await loadLlama();
+    }
+  };
+
   // Saved as one set: changing a flag can only take effect on the next start, so the server is
   // stopped when something actually changed and the card says so.
   const saveLlamaRuntime = async () => {
@@ -254,7 +266,7 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const runtimeField = (label: string, fieldKey: keyof NonNullable<typeof llamaRuntime>) => {
+  const runtimeField = (label: string, fieldKey: keyof NonNullable<typeof llamaRuntime>, step = 1) => {
     const key = fieldKey;
     const value = llamaRuntime?.[key];
 
@@ -264,6 +276,7 @@ export const SettingsView: React.FC = () => {
         <input
           type="number"
           min={0}
+          step={step}
           value={typeof value === 'number' ? value : ''}
           onChange={event => {
             const next = Number(event.target.value);
@@ -296,6 +309,15 @@ export const SettingsView: React.FC = () => {
       </select>
     </label>
   );
+
+  /** "4m 12s", so a countdown reads as time left rather than a number of seconds. */
+  const formatIdle = (seconds: number) => {
+    const total = Math.max(0, Math.round(seconds));
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+
+    return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
+  };
 
   const checkLlamaUpdate = async () => {
     setLlamaUpdateBusy(true);
@@ -471,11 +493,13 @@ export const SettingsView: React.FC = () => {
     themeIntensity,
     backgroundImage,
     backgroundDim,
+    backgroundFit,
     setTheme,
     setAccentColor,
     setThemeIntensity,
     setBackgroundImage,
     setBackgroundDim,
+    setBackgroundFit,
   } = useThemeStore();
 
   const [wallpaperError, setWallpaperError] = useState<string | null>(null);
@@ -508,20 +532,10 @@ export const SettingsView: React.FC = () => {
   // Shows what the host actually stored, so a UI/host disagreement is visible instead of guessed.
   const [prefDebug, setPrefDebug] = useState<string | null>(null);
 
-  // The store was never hydrated from the host: `settings` stayed at its hardcoded defaults, so every
-  // checkbox showed the default rather than the saved value — the app honoured the registry while the
-  // UI displayed the opposite. Load once when Settings opens.
+  // The store reads the host's stored preferences at launch; this is a retry for the case where
+  // that first attempt could not reach the host, and it is cached so it costs nothing otherwise.
   useEffect(() => {
-    void (async () => {
-      try {
-        const res: any = await webviewBridge.invoke('get_initial_state');
-        if (res?.settings) {
-          useSettingsStore.setState(state => ({ settings: { ...state.settings, ...res.settings } }));
-        }
-      } catch {
-        // Keep the defaults rather than blanking the page if the host cannot answer.
-      }
-    })();
+    void useSettingsStore.getState().loadGeneralSettings();
   }, []);
 
   /**
@@ -922,6 +936,22 @@ export const SettingsView: React.FC = () => {
                       {backgroundImage ? wallpaperName(backgroundImage) : 'None'}
                     </span>
                   </div>
+
+                  {backgroundImage ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-[var(--text-muted,#94A3B8)]">Image size:</span>
+                      {(['cover', 'contain'] as const).map(fit => (
+                        <Button
+                          key={fit}
+                          variant={backgroundFit === fit ? 'primary' : 'secondary'}
+                          size="xs"
+                          onClick={() => setBackgroundFit(fit)}
+                        >
+                          {fit === 'cover' ? 'Fill' : 'Fit'}
+                        </Button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   {backgroundImage ? (
                     <div className="max-w-sm space-y-1.5">
@@ -1687,7 +1717,7 @@ export const SettingsView: React.FC = () => {
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                           <span className="text-[10px] uppercase tracking-wide text-content-dim">Server flags</span>
                           <span className="text-[10px] text-content-dim">
-                            Applied on the next start; changing one stops a running server.
+                            The first six apply on the next start; sampling applies to the next reply.
                           </span>
                         </div>
 
@@ -1698,6 +1728,8 @@ export const SettingsView: React.FC = () => {
                           {runtimeField('Batch size', 'batchSize')}
                           {cacheField('Cache K', 'cacheTypeK')}
                           {cacheField('Cache V', 'cacheTypeV')}
+                          {runtimeField('Temperature', 'temperature', 0.05)}
+                          {runtimeField('Max tokens', 'maxTokens', 256)}
                         </div>
 
                         <label className="flex items-start gap-2 text-[11px] text-content-muted">
@@ -1779,6 +1811,33 @@ export const SettingsView: React.FC = () => {
                         </span>
                       </span>
                     </label>
+
+                    {/* An idle app used to keep the weights resident forever. This frees the card
+                        without waiting for a restart. */}
+                    <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                      <span className="text-[11px] text-content-muted">Unload when idle for</span>
+                      <select
+                        value={llama?.idleUnloadMinutes ?? 0}
+                        onChange={event => void setLlamaIdle(Number(event.target.value))}
+                        className="rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[11px] text-content-main focus:border-sky-500 focus:outline-none"
+                      >
+                        <option value={0}>Never</option>
+                        <option value={5}>5 min</option>
+                        <option value={10}>10 min</option>
+                        <option value={15}>15 min</option>
+                        <option value={30}>30 min</option>
+                        <option value={60}>1 hour</option>
+                      </select>
+                      {llama?.running && (llama?.unloadInSeconds ?? 0) > 0 ? (
+                        <span className="font-mono text-[10.5px] text-state-warning">
+                          {formatIdle(llama.unloadInSeconds)} until the model is freed
+                        </span>
+                      ) : null}
+                      <span className="w-full text-[10px] text-content-dim">
+                        Off keeps the model in memory until the app closes. Closing the app always frees
+                        it, so a loaded model never outlives the window.
+                      </span>
+                    </div>
 
                     <label className="flex items-start gap-2 pt-0.5 text-[11px] text-content-muted">
                       <input

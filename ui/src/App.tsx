@@ -64,7 +64,11 @@ export const App: React.FC = () => {
     // 1. Initialize bi-directional backend event subscriptions
     const cleanup = initBridgeListeners();
 
-    // 2. Hydrate profiles, workspaces, and past session history from C# host
+    // 2. Hydrate the stored preferences first: every other view reads them, and a save that runs
+    // before this lands would write this page's defaults over them.
+    void useSettingsStore.getState().loadGeneralSettings();
+
+    // 2b. Hydrate profiles, workspaces, and past session history from C# host
     loadProfiles();
     loadWorkspaces().then(() => {
       loadWorkspaceFiles();

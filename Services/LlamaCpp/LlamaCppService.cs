@@ -20,9 +20,11 @@ public sealed record LlamaRuntimeOptions(
     string CacheTypeK,
     string CacheTypeV,
     bool FlashAttention,
-    string ExtraArgs)
+    string ExtraArgs,
+    double Temperature,
+    int MaxTokens)
 {
-    public static LlamaRuntimeOptions Default => new(49152, 99, 0, 512, "f16", "f16", true, string.Empty);
+    public static LlamaRuntimeOptions Default => new(49152, 99, 0, 512, "f16", "f16", true, string.Empty, 0.7, 4096);
 }
 
 /// <summary>What the local model server is doing right now.</summary>
@@ -40,7 +42,9 @@ public sealed record LlamaCppStatus(
     bool AllowMultiple,
     LlamaRuntimeOptions Runtime,
     string Runner,
-    string Gpu);
+    string Gpu,
+    int IdleUnloadMinutes,
+    int UnloadInSeconds);
 
 /// <summary>The result of asking GitHub what the newest llama.cpp release is.</summary>
 public sealed record LlamaCppUpdate(
@@ -117,6 +121,14 @@ public sealed class LlamaCppService
     private Process? _server;
     private string _message = "Not started.";
 
+    // ---- idle unload ----
+
+    private readonly object _idleLock = new();
+    private DateTime _lastActivityUtc = DateTime.UtcNow;
+    private int _activeRequests;
+    // Named in full: the desktop build also sees System.Windows.Forms.Timer, which is a different clock.
+    private System.Threading.Timer? _idleTimer;
+
     /// <summary>
     /// The process actually answering on the port. The llama.app front end can hand the work to a
     /// child and exit, so the launcher's own pid is not always the server that has to be stopped.
@@ -189,6 +201,91 @@ public sealed class LlamaCppService
     /// <summary>The file currently served, or empty. Set by RunModelAsync, cleared on stop.</summary>
     public string LoadedModelPath { get; private set; } = string.Empty;
 
+    /// <summary>Idle minutes before the model is unloaded. Zero means it stays loaded.</summary>
+    public int IdleUnloadMinutes
+    {
+        get
+        {
+            int minutes = ReadSettings().IdleUnloadMinutes;
+            return minutes is >= 1 and <= 1440 ? minutes : 0;
+        }
+    }
+
+    public void SetIdleUnloadMinutes(int minutes)
+    {
+        var settings = ReadSettings();
+        settings.IdleUnloadMinutes = Math.Clamp(minutes, 0, 1440);
+        WriteSettings(settings);
+        RestartIdleTimer();
+    }
+
+    /// <summary>Marks the server as in use, which pushes the idle deadline out.</summary>
+    public void NoteActivity()
+    {
+        lock (_idleLock) _lastActivityUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// A turn in flight counts as activity even when it is quiet for a minute: prompt processing on a
+    /// large context produces no traffic, and unloading under it would kill the turn.
+    /// </summary>
+    public void BeginRequest()
+    {
+        Interlocked.Increment(ref _activeRequests);
+        NoteActivity();
+    }
+
+    public void EndRequest()
+    {
+        Interlocked.Decrement(ref _activeRequests);
+        NoteActivity();
+    }
+
+    /// <summary>Seconds left before the idle unload, or zero when it is off or already due.</summary>
+    public int SecondsUntilUnload()
+    {
+        int minutes = IdleUnloadMinutes;
+        if (minutes <= 0) return 0;
+
+        double idle;
+        lock (_idleLock) idle = (DateTime.UtcNow - _lastActivityUtc).TotalSeconds;
+
+        double left = minutes * 60 - idle;
+        return left <= 0 ? 0 : (int)Math.Round(left);
+    }
+
+    private void RestartIdleTimer()
+    {
+        _idleTimer?.Dispose();
+        _idleTimer = null;
+
+        if (IdleUnloadMinutes <= 0) return;
+
+        // Checked on a timer rather than on a request: the whole point is to act when nothing is
+        // happening, so there is no traffic to hang the check on.
+        _idleTimer = new System.Threading.Timer(_ => UnloadIfIdle(), null, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(15));
+    }
+
+    private void UnloadIfIdle()
+    {
+        int minutes = IdleUnloadMinutes;
+        if (minutes <= 0 || !AnyServerRunning) return;
+
+        if (Volatile.Read(ref _activeRequests) > 0)
+        {
+            NoteActivity();
+            return;
+        }
+
+        double idle;
+        lock (_idleLock) idle = (DateTime.UtcNow - _lastActivityUtc).TotalMinutes;
+
+        if (idle < minutes) return;
+
+        Emit("info", $"Unloaded the local model after {Math.Floor(idle)} minute{(Math.Floor(idle) == 1 ? "" : "s")} idle, freeing its memory.");
+        Stop();
+    }
+
     /// <summary>True while a server this app started is still alive.</summary>
     public bool AnyServerRunning
     {
@@ -228,7 +325,10 @@ public sealed class LlamaCppService
     {
         var clean = Sanitise(options);
         var settings = ReadSettings();
-        bool changed = RuntimeOf(settings) != clean;
+
+        // Sampling is sent with every request rather than at startup, so editing it must not cost a
+        // reload of the model. Only the flags the process is launched with count as a change.
+        bool changed = LaunchFlags(RuntimeOf(settings)) != LaunchFlags(clean);
 
         settings.ContextSize = clean.ContextSize;
         settings.GpuLayers = clean.GpuLayers;
@@ -238,11 +338,16 @@ public sealed class LlamaCppService
         settings.CacheTypeV = clean.CacheTypeV;
         settings.FlashAttention = clean.FlashAttention;
         settings.ExtraArgs = clean.ExtraArgs;
+        settings.Temperature = clean.Temperature;
+        settings.MaxTokens = clean.MaxTokens;
         WriteSettings(settings);
 
         if (changed && AnyServerRunning) Stop();
         return changed;
     }
+
+    private static LlamaRuntimeOptions LaunchFlags(LlamaRuntimeOptions options) =>
+        options with { Temperature = 0, MaxTokens = 0 };
 
     /// <summary>Clamps one submitted value per field. Anything unreadable falls back to the default.</summary>
     private static LlamaRuntimeOptions Sanitise(LlamaRuntimeOptions options)
@@ -264,7 +369,10 @@ public sealed class LlamaCppService
             CacheTypeK: Cache(options.CacheTypeK),
             CacheTypeV: Cache(options.CacheTypeV),
             FlashAttention: options.FlashAttention,
-            ExtraArgs: (options.ExtraArgs ?? string.Empty).Trim());
+            ExtraArgs: (options.ExtraArgs ?? string.Empty).Trim(),
+            // A sampler at 0 would be greedy; 2 is where a model starts inventing words.
+            Temperature: Math.Round(Math.Clamp(options.Temperature > 0 ? options.Temperature : fallback.Temperature, 0.01, 2.0), 2),
+            MaxTokens: Clamp(options.MaxTokens, 128, 131_072, fallback.MaxTokens));
     }
 
     private static LlamaRuntimeOptions RuntimeOf(LlamaSettings settings) => new(
@@ -275,7 +383,9 @@ public sealed class LlamaCppService
         string.IsNullOrWhiteSpace(settings.CacheTypeK) ? "f16" : settings.CacheTypeK,
         string.IsNullOrWhiteSpace(settings.CacheTypeV) ? "f16" : settings.CacheTypeV,
         settings.FlashAttention,
-        settings.ExtraArgs ?? string.Empty);
+        settings.ExtraArgs ?? string.Empty,
+        settings.Temperature > 0 ? settings.Temperature : LlamaRuntimeOptions.Default.Temperature,
+        settings.MaxTokens > 0 ? settings.MaxTokens : LlamaRuntimeOptions.Default.MaxTokens);
 
     public void SetCustomPath(string path)
     {
@@ -399,7 +509,9 @@ public sealed class LlamaCppService
             AllowMultiple: ReadSettings().AllowMultipleModels,
             Runtime: Runtime,
             Runner: Runner,
-            Gpu: GpuSummary);
+            Gpu: GpuSummary,
+            IdleUnloadMinutes: IdleUnloadMinutes,
+            UnloadInSeconds: running ? SecondsUntilUnload() : 0);
     }
 
     /// <summary>
@@ -509,6 +621,11 @@ public sealed class LlamaCppService
                     _message = $"Serving on 127.0.0.1:{port}.";
                     Emit("info", _message);
 
+                    // A fresh server is in use right now: the idle clock starts at the load, not at the
+                    // last request this app made to a previous one.
+                    NoteActivity();
+                    RestartIdleTimer();
+
                     // Remembered so "Start server" has a model to serve next time, without asking.
                     if (target != null)
                     {
@@ -563,6 +680,10 @@ public sealed class LlamaCppService
                 _server = null;
                 _listenerPid = 0;
                 _message = "Stopped.";
+
+                // Nothing loaded means nothing to unload.
+                _idleTimer?.Dispose();
+                _idleTimer = null;
                 // A stopped server has no speed. Keeping the last one showed it next to the next
                 // model's first reply as if that model had produced it.
                 TokensPerSecond = 0;
@@ -1009,6 +1130,17 @@ public sealed class LlamaCppService
         public bool FlashAttention { get; set; } = true;
 
         public string ExtraArgs { get; set; } = "";
+
+        /// <summary>Sampling for a chat this app drives itself; the CLI keeps its own.</summary>
+        public double Temperature { get; set; } = 0.7;
+
+        public int MaxTokens { get; set; } = 4096;
+
+        /// <summary>
+        /// Unload the model after this many idle minutes, freeing the card. Zero keeps it loaded until
+        /// the app closes, which is what a person running a long job wants.
+        /// </summary>
+        public int IdleUnloadMinutes { get; set; }
     }
 
     private ResolvedBinary? Resolve()

@@ -4,7 +4,7 @@
  */
 
 import { create } from 'zustand';
-import { webviewBridge } from '../services/webviewBridge';
+import { useSettingsStore } from './useSettingsStore';
 
 export type ThemeMode = 'dark' | 'light';
 
@@ -16,6 +16,8 @@ export interface ThemeStoreState {
   backgroundImage: string;
   /** Scrim strength over the wallpaper, 0-90 percent. */
   backgroundDim: number;
+  /** `cover` crops to fill the window, `contain` shows the whole picture with bars. */
+  backgroundFit: 'cover' | 'contain';
 
   // Actions
   setTheme: (theme: ThemeMode) => void;
@@ -23,6 +25,7 @@ export interface ThemeStoreState {
   setThemeIntensity: (intensity: number) => void;
   setBackgroundImage: (url: string) => void;
   setBackgroundDim: (dim: number) => void;
+  setBackgroundFit: (fit: 'cover' | 'contain') => void;
   applyTheme: (theme?: ThemeMode, hex?: string, intensity?: number) => void;
   initTheme: () => void;
 }
@@ -113,12 +116,26 @@ function readString(key: string, fallback: string): string {
   }
 }
 
+/**
+ * Writes the theme through the settings store rather than posting a two-field payload of its own.
+ *
+ * That store hydrates from the host before it saves, so a theme change made before the first read
+ * cannot post this page's defaults over the other stored preferences. It also means one write path
+ * and one place where a save failure is reported, instead of a second silent `catch`.
+ */
+function saveThemeToHost(theme: ThemeMode, accentColor: string) {
+  const settings = useSettingsStore.getState();
+  settings.updateSetting('theme', theme);
+  settings.updateSetting('accentColor', accentColor);
+}
+
 export const useThemeStore = create<ThemeStoreState>((set, get) => ({
   theme: (readString('agents_hub_theme', 'dark') === 'light' ? 'light' : 'dark'),
   accentColor: readString('agents_hub_accent_color', '#4049B9'),
   themeIntensity: readNumber('agents_hub_theme_intensity', 50),
   backgroundImage: readString('agents_hub_theme_bg', ''),
   backgroundDim: readNumber('agents_hub_theme_bg_dim', 45),
+  backgroundFit: readString('agents_hub_theme_bg_fit', 'cover') === 'contain' ? 'contain' : 'cover',
 
   applyTheme: (themeOverride, hexOverride, intensityOverride) => {
     const theme = themeOverride || get().theme;
@@ -126,6 +143,7 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
     const intensity = intensityOverride !== undefined ? intensityOverride : get().themeIntensity;
     const wallpaper = get().backgroundImage;
     const dim = get().backgroundDim;
+    const fit = get().backgroundFit;
     const hasWallpaper = wallpaper.length > 0;
 
     const [h, s] = hexToHsl(hex);
@@ -241,6 +259,7 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
     root.style.setProperty('--accent-ink', `hsl(${h}, ${inkSaturation}%, ${inkLightness}%)`);
 
     root.style.setProperty('--theme-image', hasWallpaper ? `url("${wallpaper}")` : 'none');
+    root.style.setProperty('--theme-image-size', fit);
 
     try {
       localStorage.setItem('agents_hub_theme', theme);
@@ -248,6 +267,7 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
       localStorage.setItem('agents_hub_theme_intensity', String(intensity));
       localStorage.setItem('agents_hub_theme_bg', wallpaper);
       localStorage.setItem('agents_hub_theme_bg_dim', String(dim));
+      localStorage.setItem('agents_hub_theme_bg_fit', fit);
     } catch {}
 
     set({ theme, accentColor: hex, themeIntensity: intensity });
@@ -255,20 +275,12 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
 
   setTheme: (newTheme: ThemeMode) => {
     get().applyTheme(newTheme, get().accentColor, get().themeIntensity);
-    try {
-      webviewBridge.invoke('save_settings', {
-        settings: { theme: newTheme, accentColor: get().accentColor },
-      });
-    } catch {}
+    saveThemeToHost(newTheme, get().accentColor);
   },
 
   setAccentColor: (newHex: string) => {
     get().applyTheme(get().theme, newHex, get().themeIntensity);
-    try {
-      webviewBridge.invoke('save_settings', {
-        settings: { theme: get().theme, accentColor: newHex },
-      });
-    } catch {}
+    saveThemeToHost(get().theme, newHex);
   },
 
   setThemeIntensity: (newIntensity: number) => {
@@ -282,6 +294,11 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
 
   setBackgroundDim: (dim: number) => {
     set({ backgroundDim: dim });
+    get().applyTheme();
+  },
+
+  setBackgroundFit: (fit: 'cover' | 'contain') => {
+    set({ backgroundFit: fit });
     get().applyTheme();
   },
 

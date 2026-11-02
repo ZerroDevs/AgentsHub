@@ -83,10 +83,14 @@ public sealed partial class CliWebTerminalServer : IDisposable
 
         // Fixed endpoints. Antigravity profiles register their own on launch through
         // EnsureEndpoint, because each profile binds its own allocated port.
+        //
+        // 9349, not 9339: 9339 is where the Antigravity CLI serves its own page and where profile
+        // ports are allocated from, so this listener lost that bind and only said so in the debug
+        // output. One port above the CLI's range keeps the two apart.
         _endpoints["claude_code"] = new EndpointListener(
             "claude_code", "Claude Code", 9229, Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
         _endpoints["antigravity_cli"] = new EndpointListener(
-            "antigravity_cli", "Antigravity CLI", 9339, Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
+            "antigravity_cli", "Antigravity CLI", 9349, Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));
 
         // Subscribe to the id-based events: the CliType events collapse every Antigravity
         // profile onto CliType.AntigravityCli, which would feed one profile's output to another
@@ -97,7 +101,7 @@ public sealed partial class CliWebTerminalServer : IDisposable
     }
 
     /// <summary>
-    /// Binds the fixed endpoints (Claude Code on 9229, Antigravity CLI on 9339). Called at launch only
+    /// Binds the fixed endpoints (Claude Code on 9229, Antigravity CLI on 9349). Called at launch only
     /// when background ports are turned on in Settings; otherwise it runs the moment something needs a
     /// terminal page, so a fresh start listens on nothing.
     /// </summary>

@@ -431,8 +431,7 @@ public sealed partial class DashboardWebBridge : IDisposable
                     try { File.Delete(stale); } catch (IOException) { }
                 }
 
-                string name = "background" + Path.GetExtension(chosenPath).ToLowerInvariant();
-                File.Copy(chosenPath, Path.Combine(dir, name), overwrite: true);
+                string name = SaveWallpaper(chosenPath, dir);
 
                 SendResponse(requestId, true, new
                 {
@@ -447,6 +446,71 @@ public sealed partial class DashboardWebBridge : IDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>Longest side a wallpaper is allowed to keep. A window is at most a couple of megapixels.</summary>
+    private const int WallpaperMaxWidth = 2560;
+
+    /// <summary>
+    /// Stores the chosen picture and returns the file name it was saved under.
+    ///
+    /// A 12-megapixel camera JPEG was copied in untouched and decoded on every launch to fill a window
+    /// that never shows it at that size. Shrinking on import keeps the background crisp and cheap, and
+    /// the person's own file is left exactly as it was. An animated GIF is copied as-is: re-encoding one
+    /// frame would quietly turn an animation into a still.
+    /// </summary>
+    private static string SaveWallpaper(string source, string directory)
+    {
+        string extension = Path.GetExtension(source).ToLowerInvariant();
+        string name = "background" + extension;
+        string destination = Path.Combine(directory, name);
+
+        if (extension is ".gif")
+        {
+            File.Copy(source, destination, overwrite: true);
+            return name;
+        }
+
+#if WINDOWS
+        try
+        {
+            using var image = Image.FromFile(source);
+            bool smallEnough = image.Width <= WallpaperMaxWidth && new FileInfo(source).Length <= 3_000_000;
+
+            if (smallEnough)
+            {
+                File.Copy(source, destination, overwrite: true);
+                return name;
+            }
+
+            double scale = Math.Min(1.0, (double)WallpaperMaxWidth / image.Width);
+            int width = Math.Max(1, (int)Math.Round(image.Width * scale));
+            int height = Math.Max(1, (int)Math.Round(image.Height * scale));
+
+            using var resized = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            using (var graphics = Graphics.FromImage(resized))
+            {
+                graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                graphics.DrawImage(image, 0, 0, width, height);
+            }
+
+            // JPEG, so the smaller copy is also the smaller file. A transparent background is not
+            // something this layer can show anyway — the scrim sits on top of it.
+            name = "background.jpg";
+            resized.Save(Path.Combine(directory, name), System.Drawing.Imaging.ImageFormat.Jpeg);
+            return name;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or OutOfMemoryException)
+        {
+            // A format the decoder refuses is copied untouched: a big wallpaper beats a missing one.
+        }
+#endif
+
+        File.Copy(source, destination, overwrite: true);
+        return name;
     }
 
     private Task HandleBrowseEditorPathAsync(string? requestId)
