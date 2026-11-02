@@ -628,6 +628,16 @@ public sealed partial class DashboardWebBridge : IDisposable
         if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = stored?.BaseUrl ?? string.Empty;
         if (string.IsNullOrWhiteSpace(apiKey)) apiKey = stored?.GetEffectiveApiKeys().FirstOrDefault() ?? string.Empty;
 
+        // A local provider has no account to ask. Its list is the shelf, which answers even while the
+        // server is off — pressing refresh on a stopped server used to fail instead of listing.
+        if (string.Equals(provId, Services.LlamaCpp.LlamaCppService.ProviderId, StringComparison.OrdinalIgnoreCase))
+        {
+            var localModels = Services.LlamaCpp.LlamaCppService.Instance.PickerModels().Select(e => e.Id).ToList();
+            AiConfigService.Instance.SetClaudeGatewayModels(provId, localModels);
+            SendResponse(requestId, true, new { models = localModels, count = localModels.Count, saved = true, providerId = provId });
+            return;
+        }
+
         // The endpoint's shape decides which auth header the request carries, and sending the wrong
         // one silently shrinks some gateways' answers.
         string protocol = data.TryGetProperty("protocol", out var prEl) ? (prEl.GetString() ?? "") : string.Empty;
@@ -673,15 +683,40 @@ public sealed partial class DashboardWebBridge : IDisposable
     private Task HandleByokModelsAsync(string? requestId)
     {
         var active = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
+        bool isLocal = string.Equals(active.Id, Services.LlamaCpp.LlamaCppService.ProviderId, StringComparison.OrdinalIgnoreCase);
+
+        // A local chat needs to know whether anything is serving before it can offer to start one, so
+        // the same answer carries it rather than a second round trip from the composer.
+        var llama = isLocal ? Services.LlamaCpp.LlamaCppService.Instance : null;
+        var status = llama?.Status();
+
+        // A local server's ids are file paths or repository names, so the picker lists the shelf and
+        // sends the matching names alongside: the id stays what llama.cpp answers to, the label is
+        // what someone wrote in Local models.
+        var picker = isLocal ? llama!.PickerModels() : [];
 
         SendResponse(requestId, true, new
         {
             providerId = active.Id,
             providerName = active.Name,
             baseUrl = active.BaseUrl,
-            models = active.Models ?? [],
+            models = isLocal ? picker.Select(entry => entry.Id).ToList() : active.Models ?? [],
+            modelLabels = picker.ToDictionary(entry => entry.Id, entry => entry.Label, StringComparer.OrdinalIgnoreCase),
             selectedModel = active.SelectedModel,
             hasKey = !string.IsNullOrWhiteSpace(active.GetEffectiveApiKeys().FirstOrDefault() ?? active.ApiKey),
+            isLocal,
+            local = status is null ? null : new
+            {
+                running = status.Running,
+                installed = status.Installed,
+                runOnRequest = status.RunOnRequest,
+                loadedModel = status.LoadedModel,
+                message = status.Message,
+                tokensPerSecond = llama!.TokensPerSecond,
+                averageTokensPerSecond = llama.AverageTokensPerSecond,
+                generatedTokens = llama.GeneratedTokens,
+                gpu = status.Gpu
+            }
         });
 
         return Task.CompletedTask;
@@ -1142,6 +1177,63 @@ public sealed partial class DashboardWebBridge : IDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Whether this app keeps its local listeners open in the background. Off by default: at launch
+    /// nothing is bound, and a port opens only while a turn or a CLI session needs it.
+    /// </summary>
+    private Task HandleBackgroundPortsGetAsync(string? requestId)
+    {
+        bool enabled = StartupHelper.GetPreference("BackgroundPortsEnabled", false);
+
+        SendResponse(requestId, true, new
+        {
+            enabled,
+            bridgeRunning = Services.ClaudeOpenRouterProxyService.Instance.IsRunning,
+            ports = new[] { 9230, 9229, 9339 }
+        });
+
+        return Task.CompletedTask;
+    }
+
+    private Task HandleBackgroundPortsSetAsync(JsonElement data, string? requestId)
+    {
+        bool enabled = data.TryGetProperty("enabled", out var el) && el.ValueKind == JsonValueKind.True;
+        StartupHelper.SetPreference("BackgroundPortsEnabled", enabled);
+        ApplyBackgroundPorts(enabled);
+
+        SendResponse(requestId, true, new
+        {
+            enabled,
+            bridgeRunning = Services.ClaudeOpenRouterProxyService.Instance.IsRunning
+        });
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Turns the background listeners on or off immediately, so the switch does what it says without a
+    /// restart. Off unbinds the bridge and the terminal pages; a turn or a CLI session that needs one
+    /// re-opens it at that moment.
+    /// </summary>
+    private void ApplyBackgroundPorts(bool enabled)
+    {
+        var bridge = Services.ClaudeOpenRouterProxyService.Instance;
+
+        if (enabled)
+        {
+            try { bridge.Start(Services.ClaudeOpenRouterProxyService.DefaultPort); } catch { }
+            try { _cliManager.WebTerminalServer.EnsureDefaultEndpoints(); } catch { }
+
+            EmitLog("Bridge", "info", "Background ports on: 9230 (bridge), 9229 and 9339 (CLI terminal pages).");
+            return;
+        }
+
+        try { bridge.Stop(); } catch { }
+        try { _cliManager.WebTerminalServer.StopAll(); } catch { }
+
+        EmitLog("Bridge", "info", "Background ports off. A port opens only while a turn or a CLI session needs it.");
     }
 
     private Task HandleMinimizeToTrayAsync(string? requestId)
@@ -1884,7 +1976,47 @@ public sealed partial class DashboardWebBridge : IDisposable
     private async Task HandleLlamaCppUseAsync(string? requestId)
     {
         var service = Services.LlamaCpp.LlamaCppService.Instance;
+
+        // Auto-run off means the person decides when a model takes the GPU. Starting one here would
+        // be the surprise the switch exists to prevent, so the chip is pointed at llama.cpp but
+        // nothing is loaded until they press Run on the shelf.
+        if (!service.RunOnRequest && !service.Status().Running)
+        {
+            var idle = service.EnsureProvider();
+
+            SendResponse(requestId, true, new
+            {
+                success = false,
+                message = "No local model is running. Open Local models and press Run, or turn on \u201cRun local model on request\u201d in Settings.",
+                status = ToLlamaCppDto(service.Status()),
+                provider = new
+                {
+                    id = idle.Id,
+                    name = idle.Name,
+                    baseUrl = idle.BaseUrl,
+                    isPreset = idle.IsPreset,
+                    protocol = idle.Protocol,
+                    useBridge = idle.UseBridge,
+                    models = idle.Models,
+                    selectedModel = idle.SelectedModel
+                }
+            });
+            return;
+        }
+
         var status = await service.StartAsync().ConfigureAwait(false);
+
+        // Nothing loaded yet: start on the first model on the shelf, the same pick the chat makes, so
+        // "Use a local model" lands in a conversation that can actually answer.
+        if (!status.Running)
+        {
+            var first = Services.LlamaCpp.LlamaModelLibrary.Instance.List().FirstOrDefault();
+            if (first != null)
+            {
+                (status, _) = await service.RunModelAsync(first.Path).ConfigureAwait(false);
+            }
+        }
+
         var provider = service.EnsureProvider();
 
         SendResponse(requestId, true, new
@@ -2052,6 +2184,101 @@ public sealed partial class DashboardWebBridge : IDisposable
         path.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase)
         || path.Contains("llama-app", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>"Run local model on request": whether a chat may load a model by itself.</summary>
+    private void HandleLlamaCppSetAutoRun(JsonElement data, string? requestId)
+    {
+        bool enabled = data.TryGetProperty("enabled", out var eEl) && eEl.ValueKind == JsonValueKind.True;
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        service.SetRunOnRequest(enabled);
+
+        EmitLog("llama.cpp", "info", enabled
+            ? "A chat may load a local model on request."
+            : "Local models only start when Run is pressed.");
+
+        SendResponse(requestId, true, new { runOnRequest = enabled, status = ToLlamaCppDto(service.Status()) });
+    }
+
+    /// <summary>One model at a time (default) or router mode with several in memory.</summary>
+    private void HandleLlamaCppSetMultiModel(JsonElement data, string? requestId)
+    {
+        bool enabled = data.TryGetProperty("enabled", out var eEl) && eEl.ValueKind == JsonValueKind.True;
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        service.SetAllowMultipleModels(enabled);
+
+        EmitLog("llama.cpp", "info", enabled
+            ? "Several local models may be loaded at once (router mode). The server was stopped."
+            : "One local model at a time. The server was stopped.");
+
+        SendResponse(requestId, true, new { allowMultiple = enabled, status = ToLlamaCppDto(service.Status()) });
+    }
+
+    /// <summary>The listening port. A running server is stopped so the next start binds the new one.</summary>
+    private void HandleLlamaCppSetPort(JsonElement data, string? requestId)
+    {
+        int port = data.TryGetProperty("port", out var pEl) && pEl.ValueKind == JsonValueKind.Number ? pEl.GetInt32() : 0;
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+
+        if (!service.SetPort(port))
+        {
+            SendResponse(requestId, false, "Pick a port between 1025 and 65535.");
+            return;
+        }
+
+        EmitLog("llama.cpp", "info", $"The local server will listen on {service.EffectivePort}.");
+        SendResponse(requestId, true, new { port = service.EffectivePort, status = ToLlamaCppDto(service.Status()) });
+    }
+
+    /// <summary>
+    /// One model at a time (default) or router mode, plus who runs the turn: this app talking to the
+    /// server's OpenAI endpoint (`direct`, the default) or the Claude Code CLI through the bridge.
+    /// </summary>
+    private void HandleLlamaCppSetRunner(JsonElement data, string? requestId)
+    {
+        string runner = data.TryGetProperty("runner", out var rEl) ? rEl.GetString() ?? "direct" : "direct";
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        service.SetRunner(runner);
+
+        EmitLog("llama.cpp", "info", service.Runner == "claude"
+            ? "Local replies now run through the Claude Code CLI."
+            : "Local replies now stream straight from llama.cpp (no Claude Code).");
+
+        SendResponse(requestId, true, new { runner = service.Runner, status = ToLlamaCppDto(service.Status()) });
+    }
+
+    /// <summary>The launch flags. A change stops a running server so the next start uses them.</summary>
+    private void HandleLlamaCppSetRuntime(JsonElement data, string? requestId)
+    {
+        var service = Services.LlamaCpp.LlamaCppService.Instance;
+        var current = service.Runtime;
+
+        int Int(string name, int fallback) =>
+            data.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.Number ? el.GetInt32() : fallback;
+
+        string Text(string name, string fallback) =>
+            data.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String ? el.GetString() ?? fallback : fallback;
+
+        var wanted = new Services.LlamaCpp.LlamaRuntimeOptions(
+            ContextSize: Int("contextSize", current.ContextSize),
+            GpuLayers: Int("gpuLayers", current.GpuLayers),
+            Threads: Int("threads", current.Threads),
+            BatchSize: Int("batchSize", current.BatchSize),
+            CacheTypeK: Text("cacheTypeK", current.CacheTypeK),
+            CacheTypeV: Text("cacheTypeV", current.CacheTypeV),
+            FlashAttention: !data.TryGetProperty("flashAttention", out var fa) || fa.ValueKind != JsonValueKind.False,
+            ExtraArgs: Text("extraArgs", current.ExtraArgs));
+
+        bool changed = service.SetRuntimeOptions(wanted);
+        var after = service.Runtime;
+
+        EmitLog("llama.cpp", "info",
+            $"Server flags: context {after.ContextSize}, GPU layers {after.GpuLayers}, threads " +
+            $"{(after.Threads > 0 ? after.Threads.ToString() : "auto")}, batch {after.BatchSize}, " +
+            $"cache {after.CacheTypeK}/{after.CacheTypeV}, flash attention {(after.FlashAttention ? "on" : "off")}" +
+            (after.ExtraArgs.Length > 0 ? $", extra: {after.ExtraArgs}" : string.Empty));
+
+        SendResponse(requestId, true, new { changed, runtime = after, status = ToLlamaCppDto(service.Status()) });
+    }
+
     private static object ToLlamaCppDto(Services.LlamaCpp.LlamaCppStatus status) => new
     {
         installed = status.Installed,
@@ -2061,7 +2288,23 @@ public sealed partial class DashboardWebBridge : IDisposable
         port = status.Port,
         endpoint = status.Endpoint,
         message = status.Message,
-        usesCustomPath = status.UsesCustomPath
+        usesCustomPath = status.UsesCustomPath,
+        loadedModel = status.LoadedModel,
+        runOnRequest = status.RunOnRequest,
+        allowMultiple = status.AllowMultiple,
+        runner = status.Runner,
+        gpu = status.Gpu,
+        runtime = new
+        {
+            contextSize = status.Runtime.ContextSize,
+            gpuLayers = status.Runtime.GpuLayers,
+            threads = status.Runtime.Threads,
+            batchSize = status.Runtime.BatchSize,
+            cacheTypeK = status.Runtime.CacheTypeK,
+            cacheTypeV = status.Runtime.CacheTypeV,
+            flashAttention = status.Runtime.FlashAttention,
+            extraArgs = status.Runtime.ExtraArgs
+        }
     };
 
 }

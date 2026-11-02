@@ -96,11 +96,42 @@ public sealed partial class CliWebTerminalServer : IDisposable
         ThemeManager.ThemeChanged += OnThemeChanged;
     }
 
-    public void Start()
+    /// <summary>
+    /// Binds the fixed endpoints (Claude Code on 9229, Antigravity CLI on 9339). Called at launch only
+    /// when background ports are turned on in Settings; otherwise it runs the moment something needs a
+    /// terminal page, so a fresh start listens on nothing.
+    /// </summary>
+    public void Start() => EnsureDefaultEndpoints();
+
+    /// <summary>Binds any fixed endpoint that is not listening yet. Safe to call repeatedly.</summary>
+    public void EnsureDefaultEndpoints()
+    {
+        if (_isDisposed) return;
+
+        foreach (var endpoint in _endpoints.Values)
+        {
+            if (endpoint.Listener is { IsListening: true }) continue;
+            StartEndpoint(endpoint);
+        }
+    }
+
+    /// <summary>
+    /// Whether a terminal page is actually bound on this port. The dashboard used to call 9229
+    /// \"Running\" from a constant, which claimed a listener that a fresh launch no longer opens.
+    /// </summary>
+    public bool IsListening(int port) =>
+        _endpoints.Values.Any(e => e.Port == port && e.Listener is { IsListening: true });
+
+    /// <summary>
+    /// Unbinds every listener but keeps the endpoints and their tokens, so a later launch or a toggle
+    /// can bind them again. Used when background ports are turned off.
+    /// </summary>
+    public void StopAll()
     {
         foreach (var endpoint in _endpoints.Values)
         {
-            StartEndpoint(endpoint);
+            StopEndpoint(endpoint);
+            endpoint.Listener = null;
         }
     }
 

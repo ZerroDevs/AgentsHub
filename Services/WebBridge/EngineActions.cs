@@ -438,6 +438,40 @@ public sealed partial class DashboardWebBridge : IDisposable
         static string Now() => DateTime.UtcNow.ToString("O");
 
         var provider = AiConfigService.Instance.GetActiveClaudeGatewayProvider();
+        bool runsLocally = string.Equals(provider.Id, Services.LlamaCpp.LlamaCppService.ProviderId, StringComparison.OrdinalIgnoreCase);
+
+        // "Run local model on request": a chat that landed on llama.cpp with nothing serving starts the
+        // server itself. Off means the turn reports that a model must be loaded first.
+        if (runsLocally
+            && !Services.LlamaCpp.LlamaCppService.Instance.Status().Running)
+        {
+            if (!Services.LlamaCpp.LlamaCppService.Instance.RunOnRequest)
+            {
+                PostEventToUi("chat_final", new
+                {
+                    sessionId,
+                    text = "No local model is running. Open Local models and press Load, or turn on \u201cRun local model on request\u201d in Settings.",
+                    timestamp = Now(),
+                });
+
+                PostEventToUi("session_status", new { sessionId, state = "error", timestamp = Now() });
+                return;
+            }
+
+            var first = Services.LlamaCpp.LlamaModelLibrary.Instance.List().FirstOrDefault();
+            if (first != null) await Services.LlamaCpp.LlamaCppService.Instance.RunModelAsync(first.Path).ConfigureAwait(false);
+        }
+
+#if DEEPSEEK_UI
+        // Direct mode (the default): this app streams from llama.cpp's own OpenAI endpoint, so no CLI
+        // and no translating bridge sit between the model and the chat.
+        if (runsLocally
+            && string.Equals(Services.LlamaCpp.LlamaCppService.Instance.Runner, "direct", StringComparison.OrdinalIgnoreCase))
+        {
+            await DispatchLocalDirectAsync(sessionId, prompt, conversationId, cwd, skipPermissions, model).ConfigureAwait(false);
+            return;
+        }
+#endif
 
         PostEventToUi("session_status", new { sessionId, state = "running", timestamp = Now() });
 
@@ -575,6 +609,164 @@ public sealed partial class DashboardWebBridge : IDisposable
             });
         }
     }
+
+#if DEEPSEEK_UI
+    /// <summary>
+    /// One local turn with no CLI in it: llama.cpp streams the reply straight into the chat, the
+    /// thought streams as it is had, and a tool request comes back as a fenced block this app runs.
+    /// </summary>
+    private async Task DispatchLocalDirectAsync(
+        string sessionId,
+        string prompt,
+        string? conversationId,
+        string? cwd,
+        bool skipPermissions,
+        string? model)
+    {
+        static string Now() => DateTime.UtcNow.ToString("O");
+
+        var engine = Services.LlamaCpp.LocalChatEngine.Instance;
+        var turnStarted = DateTime.UtcNow;
+
+        string root = string.IsNullOrWhiteSpace(cwd)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            : cwd;
+
+        PostEventToUi("session_status", new { sessionId, state = "running", timestamp = Now() });
+
+        // Opened with no text and closed on every way out, so a turn that dies still settles the row.
+        PostEventToUi("thinking", new
+        {
+            sessionId,
+            state = "running",
+            text = string.Empty,
+            timestamp = Now(),
+        });
+
+        void CloseThinking() => PostEventToUi("thinking", new
+        {
+            sessionId,
+            state = "done",
+            durationSeconds = Math.Round((DateTime.UtcNow - turnStarted).TotalSeconds, 1),
+            thinkingTokens = 0,
+            timestamp = Now(),
+        });
+
+        var progress = new Progress<string>(text =>
+            PostEventToUi("chat_token", new { sessionId, text, timestamp = Now() }));
+
+        void OnThinking(string text) => PostEventToUi("thinking", new
+        {
+            sessionId,
+            state = "running",
+            text,
+            thinkingTokens = 0,
+            timestamp = Now(),
+        });
+
+        void OnTool(Services.LlamaCpp.LocalToolStep step)
+        {
+            var (label, kind) = Services.DeepSeek.DeepSeekTools.Describe(step.Action);
+
+            if (step.IsStart)
+            {
+                PostEventToUi("tool_start", new
+                {
+                    sessionId,
+                    callId = step.CallId,
+                    tool = label,
+                    @params = new Dictionary<string, object?>
+                    {
+                        ["toolKind"] = kind,
+                        ["path"] = null,
+                        ["action"] = step.Action,
+                        ["commandLine"] = kind == "command" ? step.Detail : null,
+                        ["detail"] = step.Detail,
+                    },
+                    timestamp = Now(),
+                });
+                return;
+            }
+
+            PostEventToUi("tool_output", new
+            {
+                sessionId,
+                callId = step.CallId,
+                tool = label,
+                success = step.Success,
+                result = step.Summary,
+                error = step.Error,
+                durationMs = 0,
+                timestamp = Now(),
+            });
+        }
+
+        // The approval card is the one DeepSeek already shows: same event, same reply action, so a
+        // local model's write or command asks in the same place as any other engine's.
+        Task<bool> Approve(string callId, string action, string preview)
+        {
+            var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _deepSeekApprovals[callId] = pending;
+
+            PostEventToUi("deepseek_approval_request", new
+            {
+                sessionId,
+                callId,
+                action,
+                preview,
+                timestamp = Now(),
+            });
+
+            return pending.Task;
+        }
+
+        try
+        {
+            var turn = await engine
+                .SendAsync(prompt, root, model, conversationId, skipPermissions, progress, OnThinking, Approve, OnTool)
+                .ConfigureAwait(false);
+
+            CloseThinking();
+
+            if (!string.Equals(turn.ConversationId, conversationId, StringComparison.Ordinal))
+            {
+                PostEventToUi("conversation_started", new
+                {
+                    sessionId,
+                    conversationId = turn.ConversationId,
+                    timestamp = Now(),
+                });
+            }
+
+            PostEventToUi("chat_final", new { sessionId, text = turn.Answer, timestamp = Now() });
+            PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
+        }
+        catch (OperationCanceledException) when (engine.Stopped)
+        {
+            CloseThinking();
+            PostEventToUi("session_status", new { sessionId, state = "idle", timestamp = Now() });
+        }
+        catch (Exception ex)
+        {
+            CloseThinking();
+
+            PostEventToUi("chat_final", new
+            {
+                sessionId,
+                text = $"The local model could not answer: {ex.Message}",
+                timestamp = Now(),
+            });
+
+            PostEventToUi("session_status", new
+            {
+                sessionId,
+                state = "error",
+                error = ex.Message,
+                timestamp = Now(),
+            });
+        }
+    }
+#endif
 
     /// <summary>
     /// Claude Code names its own tools (Bash, Read, Write, Edit, Grep, WebFetch). The timeline reads

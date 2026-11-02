@@ -446,34 +446,37 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
 
         var openAiMessages = new JsonArray();
 
+        // One system message, always first. OpenAI-style gateways accept system turns anywhere, but
+        // llama.cpp runs the model's own chat template, and Qwen's (and others) refuse a system
+        // message that is not the first one: "System message must be at the beginning." Claude Code
+        // sends its environment note as a system-role message *after* the opening user turn, so
+        // forwarding it where it stands failed every request to a local model. Everything is folded
+        // into the leading system message instead.
+        var systemText = new StringBuilder();
+
+        void AppendSystem(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            if (systemText.Length > 0) systemText.Append("\n\n");
+            systemText.Append(text.Trim());
+        }
+
         // 1. Anthropic top-level system parameter
         if (root.TryGetProperty("system", out var sysEl))
         {
-            string systemPrompt = "";
             if (sysEl.ValueKind == JsonValueKind.String)
             {
-                systemPrompt = sysEl.GetString() ?? "";
+                AppendSystem(sysEl.GetString());
             }
             else if (sysEl.ValueKind == JsonValueKind.Array)
             {
-                var sb = new StringBuilder();
                 foreach (var block in sysEl.EnumerateArray())
                 {
                     if (block.TryGetProperty("text", out var tEl) && tEl.ValueKind == JsonValueKind.String)
                     {
-                        sb.AppendLine(tEl.GetString());
+                        AppendSystem(tEl.GetString());
                     }
                 }
-                systemPrompt = sb.ToString().Trim();
-            }
-
-            if (!string.IsNullOrWhiteSpace(systemPrompt))
-            {
-                openAiMessages.Add(new JsonObject
-                {
-                    ["role"] = "system",
-                    ["content"] = systemPrompt
-                });
             }
         }
 
@@ -487,6 +490,27 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                     : "user";
 
                 if (!m.TryGetProperty("content", out var contentEl)) continue;
+
+                // A system turn in the middle of the conversation (see the note above) contributes
+                // its text to the leading system message and is not emitted here.
+                if (role == "system")
+                {
+                    if (contentEl.ValueKind == JsonValueKind.String)
+                    {
+                        AppendSystem(contentEl.GetString());
+                    }
+                    else if (contentEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var block in contentEl.EnumerateArray())
+                        {
+                            if (block.TryGetProperty("text", out var blockTextEl) && blockTextEl.ValueKind == JsonValueKind.String)
+                            {
+                                AppendSystem(blockTextEl.GetString());
+                            }
+                        }
+                    }
+                    continue;
+                }
 
                 if (contentEl.ValueKind == JsonValueKind.String)
                 {
@@ -565,6 +589,11 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                     {
                         var asstMsg = new JsonObject { ["role"] = "assistant" };
                         var textStr = textBuilder.ToString();
+
+                        // A turn that held only a thought has nothing to say back to the model, and
+                        // an empty assistant message is what the templates choke on next.
+                        if (textStr.Length == 0 && toolCalls.Count == 0) continue;
+
                         asstMsg["content"] = string.IsNullOrEmpty(textStr) && toolCalls.Count > 0 ? null : textStr;
 
                         if (toolCalls.Count > 0)
@@ -597,6 +626,15 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
                     }
                 }
             }
+        }
+
+        if (systemText.Length > 0)
+        {
+            openAiMessages.Insert(0, new JsonObject
+            {
+                ["role"] = "system",
+                ["content"] = systemText.ToString()
+            });
         }
 
         openAiObj["messages"] = openAiMessages;

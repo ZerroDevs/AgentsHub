@@ -43,10 +43,49 @@ public sealed class LlamaModelLibrary
     public string ModelsDirectory { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AgentsHub", "models");
 
+    /// <summary>Where a new download is written: the folder the person picked, else the app's own.</summary>
+    public string DownloadDirectory
+    {
+        get
+        {
+            string chosen = Load().DownloadDirectory.Trim();
+            return chosen.Length > 0 && Directory.Exists(chosen) ? chosen : ModelsDirectory;
+        }
+    }
+
+    /// <summary>Sets the download folder. An empty path means "back to the default".</summary>
+    public void SetDownloadDirectory(string directory)
+    {
+        var shelf = Load();
+        shelf.DownloadDirectory = directory?.Trim() ?? string.Empty;
+        Save(shelf);
+    }
+
+    /// <summary>Gives a model a name that only this app uses; the file is not renamed.</summary>
+    public bool Rename(string path, string name)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+
+        var shelf = Load();
+        string trimmed = name?.Trim() ?? string.Empty;
+
+        if (trimmed.Length == 0) shelf.Names.Remove(path);
+        else shelf.Names[path] = trimmed;
+
+        Save(shelf);
+        return true;
+    }
+
     private sealed class Shelf
     {
         public List<string> Files { get; set; } = [];
         public List<string> Folders { get; set; } = [];
+
+        /// <summary>Display names, keyed by model path. The file on disk keeps its own name.</summary>
+        public Dictionary<string, string> Names { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Where downloads land. Empty means the app's own models folder.</summary>
+        public string DownloadDirectory { get; set; } = "";
     }
 
     private Shelf Load()
@@ -82,29 +121,33 @@ public sealed class LlamaModelLibrary
     {
         var found = new Dictionary<string, LocalModel>(StringComparer.OrdinalIgnoreCase);
 
-        try
+        var shelf = Load();
+
+        // Both the app's folder and the one downloads are pointed at, when they differ: a model
+        // downloaded elsewhere would otherwise vanish from the shelf it was downloaded from.
+        foreach (var root in new[] { ModelsDirectory, DownloadDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            if (Directory.Exists(ModelsDirectory))
+            try
             {
-                foreach (var file in Directory.EnumerateFiles(ModelsDirectory, "*.gguf"))
+                if (!Directory.Exists(root)) continue;
+
+                foreach (var file in Directory.EnumerateFiles(root, "*.gguf"))
                 {
                     if (IsProjector(file)) continue;
-                    found[file] = Describe(file, "downloaded", true);
+                    found[file] = Describe(file, "downloaded", true, NameOf(shelf, file));
                 }
             }
+            catch
+            {
+                // An unreadable folder is not an error worth failing the list over.
+            }
         }
-        catch
-        {
-            // An unreadable folder is not an error worth failing the list over.
-        }
-
-        var shelf = Load();
 
         foreach (var file in shelf.Files)
         {
             try
             {
-                if (File.Exists(file) && !IsProjector(file)) found[file] = Describe(file, "added", false);
+                if (File.Exists(file) && !IsProjector(file)) found[file] = Describe(file, "added", false, NameOf(shelf, file));
             }
             catch
             {
@@ -120,7 +163,7 @@ public sealed class LlamaModelLibrary
                 foreach (var file in Directory.EnumerateFiles(folder, "*.gguf", SearchOption.AllDirectories))
                 {
                     if (IsProjector(file)) continue;
-                    found[file] = Describe(file, "folder", false);
+                    found[file] = Describe(file, "folder", false, NameOf(shelf, file));
                 }
             }
             catch
@@ -199,14 +242,22 @@ public sealed class LlamaModelLibrary
         try
         {
             var full = Path.GetFullPath(path);
-            var root = Path.GetFullPath(ModelsDirectory);
-            return full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+            foreach (var root in new[] { ModelsDirectory, DownloadDirectory })
+            {
+                if (full.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+
+            return false;
         }
         catch
         {
             return false;
         }
     }
+
+    private static string? NameOf(Shelf shelf, string path) =>
+        shelf.Names.TryGetValue(path, out var name) && !string.IsNullOrWhiteSpace(name) ? name : null;
 
     // ---- Hugging Face ----
 
@@ -301,10 +352,11 @@ public sealed class LlamaModelLibrary
     /// </summary>
     public async Task<LocalModel> DownloadAsync(string repo, string file, Action<long, long> progress, CancellationToken ct = default)
     {
-        Directory.CreateDirectory(ModelsDirectory);
+        string root = DownloadDirectory;
+        Directory.CreateDirectory(root);
 
         string name = Path.GetFileName(file);
-        string target = Path.Combine(ModelsDirectory, name);
+        string target = Path.Combine(root, name);
         string partial = target + ".part";
 
         string url = $"{DownloadApi}/{repo}/resolve/main/{Uri.EscapeDataString(file).Replace("%2F", "/")}?download=true";
@@ -353,28 +405,32 @@ public sealed class LlamaModelLibrary
 
     public void CleanPartialFiles()
     {
-        try
+        // A .part left by a crash is gigabytes of nothing; it is never a candidate for reuse. Both
+        // folders are swept, because the download folder can be changed between runs.
+        foreach (var root in new[] { ModelsDirectory, DownloadDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            if (!Directory.Exists(ModelsDirectory)) return;
-
-            // A .part left by a crash is gigabytes of nothing; it is never a candidate for reuse.
-            foreach (var leftover in Directory.EnumerateFiles(ModelsDirectory, "*.part"))
+            try
             {
-                try { File.Delete(leftover); } catch { }
+                if (!Directory.Exists(root)) continue;
+
+                foreach (var leftover in Directory.EnumerateFiles(root, "*.part"))
+                {
+                    try { File.Delete(leftover); } catch { }
+                }
             }
-        }
-        catch
-        {
+            catch
+            {
+            }
         }
     }
 
     // ---- helpers ----
 
-    private static LocalModel Describe(string path, string origin, bool managed)
+    private static LocalModel Describe(string path, string origin, bool managed, string? displayName = null)
     {
         return new LocalModel(
             path,
-            Path.GetFileNameWithoutExtension(path),
+            string.IsNullOrWhiteSpace(displayName) ? Path.GetFileNameWithoutExtension(path) : displayName.Trim(),
             FileSize(path),
             origin,
             managed,
@@ -462,7 +518,7 @@ public sealed class LlamaModelLibrary
     {
         try
         {
-            var partial = Path.Combine(ModelsDirectory, Path.GetFileName(file) + ".part");
+            var partial = Path.Combine(DownloadDirectory, Path.GetFileName(file) + ".part");
             return File.Exists(partial) ? new FileInfo(partial).Length : 0;
         }
         catch

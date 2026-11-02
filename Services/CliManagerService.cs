@@ -161,7 +161,13 @@ public class CliManagerService : IDisposable
         };
 
         _webTerminalServer = new CliWebTerminalServer(this);
-        _webTerminalServer.Start();
+
+        // Nothing listens at launch unless the person asked for background ports: the terminal pages
+        // are bound when a session that needs one starts, which is what Start() below does.
+        if (Helpers.StartupHelper.GetPreference("BackgroundPortsEnabled", false))
+        {
+            _webTerminalServer.Start();
+        }
     }
 
     public static bool IsAntigravityProfileId(string id, out string profileName)
@@ -433,6 +439,11 @@ public class CliManagerService : IDisposable
     public void Start(string id)
     {
         id = ResolveSessionId(id);
+
+        // A session is about to run, so its terminal page needs an endpoint. Bound here rather than at
+        // launch, so a machine that never opens a CLI listens on nothing.
+        _webTerminalServer.EnsureDefaultEndpoints();
+
         bool isAgyProf = IsAntigravityProfileId(id, out var profileName);
         if (!isAgyProf)
         {

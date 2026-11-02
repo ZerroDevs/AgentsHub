@@ -564,6 +564,9 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             // BYOK runs the Claude Code CLI as a child of this process, so it is killed the same way.
             Services.Byok.ByokEngine.Instance.Stop();
+
+            // A direct local turn is an open HTTP stream, so cancelling its token ends it.
+            Services.LlamaCpp.LocalChatEngine.Instance.Stop();
 #endif
             await Sidecar.SidecarHostService.Instance.AbortTaskAsync(taskId, reason).ConfigureAwait(false);
             SendResponse(requestId, true, new { aborted = true, taskId });

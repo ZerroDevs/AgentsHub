@@ -23,8 +23,94 @@ public sealed partial class DashboardWebBridge
 
         SendResponse(requestId, true, new
         {
-            directory = library.ModelsDirectory,
+            directory = library.DownloadDirectory,
+            defaultDirectory = library.ModelsDirectory,
+            usingDefaultDirectory = string.Equals(library.DownloadDirectory, library.ModelsDirectory, StringComparison.OrdinalIgnoreCase),
+            runOnRequest = LlamaCppService.Instance.RunOnRequest,
+            loadedModel = LlamaCppService.Instance.LoadedModelPath,
+            server = ToLlamaCppDto(LlamaCppService.Instance.Status()),
             memory = new { vramMb = budget.VramMb, ramMb = budget.RamMb },
+            models = DescribeLocalModels()
+        });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Frees the model's memory. A server started with a file serves exactly that file, so unloading
+    /// is stopping the process: there is nothing left to answer with afterwards.
+    /// </summary>
+    private Task HandleLocalModelsUnloadAsync(string? requestId)
+    {
+        LlamaCppService.Instance.Stop();
+        EmitLog("llama.cpp", "info", "Model unloaded and the local server stopped.");
+
+        SendResponse(requestId, true, new
+        {
+            success = true,
+            server = ToLlamaCppDto(LlamaCppService.Instance.Status()),
+            models = DescribeLocalModels()
+        });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Renames a model in this app. The file on disk keeps its name, so a re-add finds it.</summary>
+    private Task HandleLocalModelsRenameAsync(JsonElement data, string? requestId)
+    {
+        string path = data.TryGetProperty("path", out var pEl) ? pEl.GetString() ?? "" : "";
+        string name = data.TryGetProperty("name", out var nEl) ? nEl.GetString() ?? "" : "";
+
+        bool renamed = LlamaModelLibrary.Instance.Rename(path, name);
+        SendResponse(requestId, renamed, new { success = renamed, models = DescribeLocalModels() });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Picks where new downloads land. Empty is not an answer: the default folder stays.</summary>
+    private Task HandleLocalModelsPickDownloadFolderAsync(string? requestId)
+    {
+        string? selected = null;
+
+#if WINDOWS
+        MaybePickOnUiThread(f =>
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Where downloaded models are saved",
+                UseDescriptionForTitle = true,
+                SelectedPath = LlamaModelLibrary.Instance.DownloadDirectory
+            };
+
+            if (dialog.ShowDialog(f) == DialogResult.OK) selected = dialog.SelectedPath;
+        });
+#endif
+
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            SendResponse(requestId, true, new { chosen = false, directory = LlamaModelLibrary.Instance.DownloadDirectory });
+            return Task.CompletedTask;
+        }
+
+        LlamaModelLibrary.Instance.SetDownloadDirectory(selected);
+        EmitLog("llama.cpp", "info", $"Downloads now go to {selected}.");
+
+        SendResponse(requestId, true, new
+        {
+            chosen = true,
+            directory = LlamaModelLibrary.Instance.DownloadDirectory,
+            usingDefaultDirectory = false,
+            models = DescribeLocalModels()
+        });
+        return Task.CompletedTask;
+    }
+
+    private Task HandleLocalModelsResetDownloadFolderAsync(string? requestId)
+    {
+        var library = LlamaModelLibrary.Instance;
+        library.SetDownloadDirectory(string.Empty);
+
+        SendResponse(requestId, true, new
+        {
+            directory = library.DownloadDirectory,
+            usingDefaultDirectory = true,
             models = DescribeLocalModels()
         });
         return Task.CompletedTask;

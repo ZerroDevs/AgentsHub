@@ -1056,7 +1056,15 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
       } else if (thoughtIndex >= 0) {
         const current = timeline[thoughtIndex] as ThoughtTimelineNode;
         const isDone = thinkingState === 'done';
-        const mergedText = text ? current.text + (current.text ? '\n' : '') + text : current.text;
+        // Reasoning arrives as stream chunks, so the pieces join directly. A newline between them
+        // put every token on its own line; an engine that sends whole paragraphs already ends its
+        // chunk with one, and that newline survives the concatenation. A sender that repeats the
+        // whole thought each time replaces the text instead of appending it again.
+        const mergedText = !text
+          ? current.text
+          : current.text && text.startsWith(current.text)
+            ? text
+            : current.text + text;
         const mergedTokens = thinkingTokens !== undefined ? thinkingTokens : current.tokens;
 
         // Nothing was actually said and no reasoning tokens were counted, so there is no step to

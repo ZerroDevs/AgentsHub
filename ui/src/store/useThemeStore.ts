@@ -136,15 +136,25 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
     document.body.dataset.themeBg = hasWallpaper ? 'image' : 'none';
 
     /**
-     * Surfaces are opaque without a wallpaper. With one, each keeps a high alpha instead of going
-     * fully transparent: the photo shows through the chrome while body text keeps its contrast.
+     * Surfaces are opaque without a wallpaper. With one, how much of the photo they hide is the dim
+     * slider's job: at 0% the panels are thin veils and the picture is plainly there, and at 90%
+     * they are nearly solid so text stays readable over a busy image.
+     *
+     * The alphas used to be fixed constants, which is why 0% still looked like a faint photo behind
+     * opaque cards — the scrim was the only thing the slider touched, and the panels did the hiding.
      */
     /** Keeps a tinted hue visible on surfaces and stops an extreme accent from flooding them. */
     const satFloor = (value: number) => Math.min(Math.max(Math.round(value), 4), 90);
 
+    const veil = Math.min(Math.max(dim, 0), 95) / 100;
+
+    /** From a see-through floor at 0% to nearly solid at the top of the slider. */
+    const alphaFor = (floor: number) =>
+      Math.round((floor + (0.96 - floor) * (veil / 0.95)) * 1000) / 1000;
+
     const surface = (name: string, lightness: number, saturation: number, alpha: number) => {
       const color = hasWallpaper
-        ? `hsla(${h}, ${satFloor(saturation)}%, ${lightness}%, ${alpha})`
+        ? `hsla(${h}, ${satFloor(saturation)}%, ${lightness}%, ${alphaFor(alpha)})`
         : `hsl(${h}, ${satFloor(saturation)}%, ${lightness}%)`;
       root.style.setProperty(name, color);
     };
@@ -154,15 +164,16 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
       root.classList.remove('light');
 
       const sTint = Math.round((s * (intensity / 100)) * 0.45);
-      surface('--bg-app', 6, Math.max(sTint, 8), 0.5);
-      surface('--bg-sidebar', 7.5, Math.round(sTint * 1.2), 0.78);
-      surface('--bg-header', 5.5, sTint, 0.6);
-      surface('--bg-card', 9, Math.round(sTint * 1.15), 0.84);
-      surface('--bg-card-hover', 11.5, Math.round(sTint * 1.3), 0.9);
-      surface('--bg-input', 7, sTint, 0.9);
-      surface('--bg-terminal', 3.5, sTint, 0.93);
-      surface('--bg-code', 3.5, sTint, 0.93);
-      surface('--bg-code-header', 5.5, sTint, 0.95);
+      surface('--bg-app', 7, Math.max(sTint, 8), 0.14);
+      surface('--bg-sidebar', 7.5, Math.round(sTint * 1.2), 0.3);
+      surface('--bg-header', 5.5, sTint, 0.22);
+      surface('--bg-card', 9, Math.round(sTint * 1.15), 0.46);
+      surface('--bg-card-hover', 11.5, Math.round(sTint * 1.3), 0.56);
+      // Inputs keep more body: a field you type into has to stay readable whatever is behind it.
+      surface('--bg-input', 8, sTint, 0.78);
+      surface('--bg-terminal', 3.5, sTint, 0.88);
+      surface('--bg-code', 3.5, sTint, 0.88);
+      surface('--bg-code-header', 5.5, sTint, 0.92);
 
       root.style.setProperty('--border-subtle', hasWallpaper
         ? `hsla(${h}, 20%, 70%, 0.18)`
@@ -182,15 +193,15 @@ export const useThemeStore = create<ThemeStoreState>((set, get) => ({
       root.classList.add('light');
 
       const sTintLight = Math.round((s * (intensity / 100)) * 0.35);
-      surface('--bg-app', 96, sTintLight, 0.62);
-      surface('--bg-sidebar', 93, Math.round(sTintLight * 1.35), 0.85);
-      surface('--bg-header', 89, Math.round(sTintLight * 1.5), 0.72);
-      surface('--bg-card', 100, sTintLight, 0.88);
-      surface('--bg-card-hover', 97, sTintLight, 0.94);
-      surface('--bg-input', 97, sTintLight, 0.94);
-      surface('--bg-terminal', 96, sTintLight, 0.95);
-      surface('--bg-code', 96, sTintLight, 0.95);
-      surface('--bg-code-header', 92, sTintLight, 0.96);
+      surface('--bg-app', 99, sTintLight, 0.12);
+      surface('--bg-sidebar', 97, Math.round(sTintLight * 1.35), 0.26);
+      surface('--bg-header', 94, Math.round(sTintLight * 1.5), 0.2);
+      surface('--bg-card', 100, sTintLight, 0.42);
+      surface('--bg-card-hover', 98, sTintLight, 0.52);
+      surface('--bg-input', 98, sTintLight, 0.78);
+      surface('--bg-terminal', 97, sTintLight, 0.86);
+      surface('--bg-code', 97, sTintLight, 0.86);
+      surface('--bg-code-header', 94, sTintLight, 0.9);
 
       root.style.setProperty('--border-subtle', hasWallpaper ? `hsla(${h}, 25%, 45%, 0.2)` : `hsl(${h}, ${Math.round(sTintLight * 1.25)}%, 84%)`);
       root.style.setProperty('--border-light', hasWallpaper ? `hsla(${h}, 22%, 40%, 0.28)` : `hsl(${h}, ${Math.round(sTintLight * 1.4)}%, 76%)`);

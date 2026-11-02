@@ -122,6 +122,43 @@ public sealed partial class DashboardWebBridge : IDisposable
         // their own tag, next to the CLI output they explain.
         Services.LlamaCpp.LlamaCppService.Instance.LogEmitted += (level, message) => EmitLog("llama.cpp", level, message);
 
+        // A crashed run leaves its server behind, holding the port and its memory. Clear that before
+        // anything tries to start one, then follow the port a saved provider may still name.
+        Services.LlamaCpp.LlamaCppService.Instance.ReapStaleServer();
+        Services.LlamaCpp.LlamaCppService.Instance.RepointProvider();
+
+        // Whoever starts or stops the server — a chat, the shelf, Settings — the rest of the UI hears
+        // about it here, so no view keeps showing a state another one changed.
+        Services.LlamaCpp.LlamaCppService.Instance.StateChanged += () =>
+        {
+            var status = Services.LlamaCpp.LlamaCppService.Instance.Status();
+
+            PostEventToUi("local_server_changed", new
+            {
+                running = status.Running,
+                port = status.Port,
+                loadedModel = status.LoadedModel,
+                message = status.Message
+            });
+        };
+
+        // llama.cpp measures its own generation speed at the end of a reply. The composer shows the
+        // number instead of guessing one from the clock.
+        Services.LlamaCpp.LlamaCppService.Instance.RateChanged += () =>
+        {
+            var llama = Services.LlamaCpp.LlamaCppService.Instance;
+
+            PostEventToUi("local_model_rate", new
+            {
+                tokensPerSecond = llama.TokensPerSecond,
+                averageTokensPerSecond = llama.AverageTokensPerSecond,
+                generatedTokens = llama.GeneratedTokens,
+                // Measured by llama.cpp itself: neither number is estimated from the clock.
+                streaming = false,
+                estimated = false
+            });
+        };
+
         HookBackendEvents();
     }
 
@@ -1380,6 +1417,50 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             case "local_models_forget":
                 await HandleLocalModelsForgetAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_unload":
+                await HandleLocalModelsUnloadAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_rename":
+                await HandleLocalModelsRenameAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_pick_download_folder":
+                await HandleLocalModelsPickDownloadFolderAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_reset_download_folder":
+                await HandleLocalModelsResetDownloadFolderAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "llamacpp_set_auto_run":
+                HandleLlamaCppSetAutoRun(data, requestId);
+                break;
+
+            case "llamacpp_set_multi_model":
+                HandleLlamaCppSetMultiModel(data, requestId);
+                break;
+
+            case "llamacpp_set_port":
+                HandleLlamaCppSetPort(data, requestId);
+                break;
+
+            case "llamacpp_set_runtime":
+                HandleLlamaCppSetRuntime(data, requestId);
+                break;
+
+            case "llamacpp_set_runner":
+                HandleLlamaCppSetRunner(data, requestId);
+                break;
+
+            case "background_ports_get":
+                await HandleBackgroundPortsGetAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "background_ports_set":
+                await HandleBackgroundPortsSetAsync(data, requestId).ConfigureAwait(false);
                 break;
 
             case "local_models_open_folder":

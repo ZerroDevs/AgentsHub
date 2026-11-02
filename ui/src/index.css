@@ -175,9 +175,15 @@ body[data-theme-bg='image']::after {
 
 body[data-theme-bg='image']::before {
   background-image: var(--theme-image);
+  /* Fills the window at any size and aspect: the shorter side is cropped, never stretched or
+     tiled, so a phone photo and a wide wallpaper both cover without distortion. */
   background-size: cover;
-  background-position: center;
+  background-position: center center;
   background-repeat: no-repeat;
+  /* Its own composited layer: the app repaints constantly while a turn streams, and without this
+     the photo was re-decoded on every frame. */
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 body[data-theme-bg='image']::after {

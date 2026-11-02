@@ -96,10 +96,56 @@ export const SettingsView: React.FC = () => {
   const [llamaBusy, setLlamaBusy] = useState(false);
   const [llamaUpdate, setLlamaUpdate] = useState<any | null>(null);
   const [llamaUpdateBusy, setLlamaUpdateBusy] = useState(false);
+  /** null until the first status arrives; then a draft the person can edit before saving. */
+  const [llamaPort, setLlamaPort] = useState<string | null>(null);
+  /**
+   * The flags the server is started with. A draft, like the port: editing one field should not restart
+   * a server that is mid-turn, so they are saved together with the button.
+   */
+  const [llamaRuntime, setLlamaRuntime] = useState<{
+    contextSize: number;
+    gpuLayers: number;
+    threads: number;
+    batchSize: number;
+    cacheTypeK: string;
+    cacheTypeV: string;
+    flashAttention: boolean;
+    extraArgs: string;
+  } | null>(null);
+  /** `direct` (streamed here) or `claude` (through the Claude Code CLI). */
+  const [llamaRunner, setLlamaRunner] = useState<string>('direct');
+  /**
+   * Whether the bridge and the CLI terminal pages stay bound from launch. Held here rather than in
+   * the general-settings store because that store never reads its values back from the host, so a
+   * toggle there would show "off" after a restart and silently write the wrong value on the next save.
+   */
+  const [backgroundPorts, setBackgroundPorts] = useState(false);
+
+  useEffect(() => {
+    void webviewBridge
+      .invoke('background_ports_get')
+      .then((res: any) => setBackgroundPorts(res?.enabled === true))
+      .catch(() => {});
+  }, []);
+
+  const toggleBackgroundPorts = async (enabled: boolean) => {
+    setBackgroundPorts(enabled);
+    try {
+      const res: any = await webviewBridge.invoke('background_ports_set', { enabled });
+      setBackgroundPorts(res?.enabled === true);
+    } catch {
+      // A failed write leaves the switch where it was.
+      setBackgroundPorts(!enabled);
+    }
+  };
 
   const loadLlama = async () => {
     try {
-      setLlama(await webviewBridge.invoke('llamacpp_status'));
+      const state: any = await webviewBridge.invoke('llamacpp_status');
+      setLlama(state);
+      setLlamaPort(previous => previous ?? String(state?.port ?? 8080));
+      setLlamaRuntime(previous => previous ?? state?.runtime ?? null);
+      setLlamaRunner(state?.runner ?? 'direct');
     } catch {
       setLlama(null);
     }
@@ -107,6 +153,11 @@ export const SettingsView: React.FC = () => {
 
   useEffect(() => {
     void loadLlama();
+
+    // A chat can start or stop the server too, so this card cannot be a one-time snapshot: it
+    // otherwise kept claiming the server was stopped while a local chat was answering.
+    const timer = window.setInterval(() => void loadLlama(), 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const runLlama = async (action: 'llamacpp_start' | 'llamacpp_stop' | 'llamacpp_use') => {
@@ -114,6 +165,39 @@ export const SettingsView: React.FC = () => {
     try {
       const res: any = await webviewBridge.invoke(action);
       setLlama(res?.status ?? res);
+      setLlamaPort(previous => previous ?? String((res?.status ?? res)?.port ?? 8080));
+      // The composer's local bar and the shelf read the same state.
+      window.dispatchEvent(new CustomEvent('byok-provider-changed'));
+    } catch {
+      await loadLlama();
+    } finally {
+      setLlamaBusy(false);
+    }
+  };
+
+  const setLlamaMulti = async (enabled: boolean) => {
+    setLlamaBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_set_multi_model', { enabled });
+      if (res?.status) setLlama(res.status);
+      window.dispatchEvent(new CustomEvent('byok-provider-changed'));
+    } catch {
+      await loadLlama();
+    } finally {
+      setLlamaBusy(false);
+    }
+  };
+
+  const saveLlamaPort = async () => {
+    const port = Number(llamaPort);
+    if (!Number.isFinite(port) || port <= 0) return;
+
+    setLlamaBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_set_port', { port });
+      if (res?.status) setLlama(res.status);
+      setLlamaPort(String(res?.port ?? port));
+      window.dispatchEvent(new CustomEvent('byok-provider-changed'));
     } catch {
       await loadLlama();
     } finally {
@@ -131,6 +215,87 @@ export const SettingsView: React.FC = () => {
       // A cancelled picker is not an error.
     }
   };
+
+  // The switch the shelf and the chat both obey: off means nothing loads until Run is pressed.
+  const setLlamaAutoRun = async (enabled: boolean) => {
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_set_auto_run', { enabled });
+      if (res?.status) setLlama(res.status);
+    } catch {
+      await loadLlama();
+    }
+  };
+
+  // Saved as one set: changing a flag can only take effect on the next start, so the server is
+  // stopped when something actually changed and the card says so.
+  const saveLlamaRuntime = async () => {
+    if (!llamaRuntime) return;
+
+    setLlamaBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_set_runtime', llamaRuntime);
+      if (res?.status) setLlama(res.status);
+      setLlamaRuntime(res?.runtime ?? llamaRuntime);
+    } catch {
+      await loadLlama();
+    } finally {
+      setLlamaBusy(false);
+    }
+  };
+
+  const setLlamaRun = async (runner: 'direct' | 'claude') => {
+    setLlamaRunner(runner);
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_set_runner', { runner });
+      if (res?.status) setLlama(res.status);
+      setLlamaRunner(res?.runner ?? runner);
+    } catch {
+      await loadLlama();
+    }
+  };
+
+  const runtimeField = (label: string, fieldKey: keyof NonNullable<typeof llamaRuntime>) => {
+    const key = fieldKey;
+    const value = llamaRuntime?.[key];
+
+    return (
+      <label className="flex flex-col gap-0.5">
+        <span className="text-[9.5px] uppercase tracking-wide text-content-dim">{label}</span>
+        <input
+          type="number"
+          min={0}
+          value={typeof value === 'number' ? value : ''}
+          onChange={event => {
+            const next = Number(event.target.value);
+            setLlamaRuntime(previous =>
+              previous ? { ...previous, [key]: Number.isFinite(next) ? next : 0 } : previous
+            );
+          }}
+          className="rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[11px] text-content-main focus:border-sky-500 focus:outline-none"
+        />
+      </label>
+    );
+  };
+
+  const cacheField = (label: string, key: 'cacheTypeK' | 'cacheTypeV') => (
+    <label className="flex flex-col gap-0.5">
+      <span className="text-[9.5px] uppercase tracking-wide text-content-dim">{label}</span>
+      <select
+        value={llamaRuntime?.[key] ?? 'f16'}
+        onChange={event =>
+          setLlamaRuntime(previous => (previous ? { ...previous, [key]: event.target.value } : previous))
+        }
+        className="rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[11px] text-content-main focus:border-sky-500 focus:outline-none"
+      >
+        <option value="f16">f16 (full)</option>
+        <option value="q8_0">q8_0 (half)</option>
+        <option value="q5_1">q5_1</option>
+        <option value="q5_0">q5_0</option>
+        <option value="q4_1">q4_1</option>
+        <option value="q4_0">q4_0 (smallest)</option>
+      </select>
+    </label>
+  );
 
   const checkLlamaUpdate = async () => {
     setLlamaUpdateBusy(true);
@@ -736,6 +901,15 @@ export const SettingsView: React.FC = () => {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    {/* A thumbnail, so "Replace image" is not the only way to find out which
+                        picture is currently the background. */}
+                    {backgroundImage ? (
+                      <img
+                        src={backgroundImage}
+                        alt="Current background"
+                        className="h-12 w-20 flex-shrink-0 rounded border border-[var(--border-subtle,#1E293B)] object-cover"
+                      />
+                    ) : null}
                     <Button variant="secondary" size="xs" onClick={() => void chooseImage()}>
                       {backgroundImage ? 'Replace image' : 'Choose image'}
                     </Button>
@@ -763,6 +937,10 @@ export const SettingsView: React.FC = () => {
                         onChange={e => setBackgroundDim(Number(e.target.value))}
                         className="w-full accent-sky-500 cursor-pointer"
                       />
+                      <p className="text-[10px] text-[var(--text-dim,#64748B)]">
+                        0% lets the picture through the panels; higher values veil it so text stays
+                        readable over a busy image.
+                      </p>
                     </div>
                   ) : null}
 
@@ -1341,6 +1519,27 @@ export const SettingsView: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Local ports. Off by default: a bridge or a terminal page is opened by whatever
+                    needs it, not kept listening from launch. */}
+                <div className="space-y-1 rounded-lg border border-[var(--border-subtle,#1E293B)] bg-[var(--bg-input,#0D1322)] p-3">
+                  <label className="flex items-start gap-2 cursor-pointer text-xs text-[var(--text-main,#F1F5F9)]">
+                    <input
+                      type="checkbox"
+                      checked={backgroundPorts}
+                      onChange={event => void toggleBackgroundPorts(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded accent-sky-500"
+                    />
+                    <span>
+                      Keep local ports open in the background
+                      <span className="mt-0.5 block text-[10.5px] text-content-dim">
+                        Off (default): nothing listens when the app starts. 9230 (Claude bridge), 9229 and 9339
+                        (CLI terminal pages) are opened by the turn or the session that needs one. On: they
+                        are bound from launch and stay bound.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
                 {/* Local models: llama.cpp. Off unless someone starts it, because a local model
                     costs RAM and a GPU slot that a person who never runs one should not pay. */}
                 <div className="space-y-2 pt-3 border-t border-[var(--border-subtle,#1E293B)]">
@@ -1393,9 +1592,166 @@ export const SettingsView: React.FC = () => {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[10px] uppercase tracking-wide text-content-dim">Endpoint</span>
                       <span className="font-mono text-[11px] text-content-dim break-all">
-                        {llama?.endpoint ?? 'http://127.0.0.1:9931/v1'}
+                        {llama?.endpoint ?? 'http://127.0.0.1:8080/v1'}
                       </span>
                     </div>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] uppercase tracking-wide text-content-dim">Port</span>
+                      <input
+                        type="number"
+                        min={1025}
+                        max={65535}
+                        value={llamaPort ?? ''}
+                        onChange={event => setLlamaPort(event.target.value)}
+                        onKeyDown={event => {
+                          if (event.key === 'Enter') void saveLlamaPort();
+                        }}
+                        aria-label="llama.cpp listening port"
+                        className="w-20 rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[11px] text-content-main focus:border-sky-500 focus:outline-none"
+                      />
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        disabled={llamaBusy || !llamaPort || Number(llamaPort) === llama?.port}
+                        onClick={() => void saveLlamaPort()}
+                      >
+                        Save port
+                      </Button>
+                      <span className="text-[10px] text-content-dim">
+                        Changing it stops the server; the chat follows the new port.
+                      </span>
+                    </div>
+
+                    {/* Where the model actually runs. Silence here used to mean the CPU with no way
+                        to tell, which is why this row exists at all. */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] uppercase tracking-wide text-content-dim">Compute</span>
+                      <span
+                        className={`font-mono text-[11px] ${
+                          llama?.gpu && llama.gpu !== 'CPU only' ? 'text-state-success' : 'text-content-dim'
+                        }`}
+                        title="Read from llama.cpp's own load lines: how many layers it put on the card."
+                      >
+                        {llama?.gpu || (llama?.running ? 'loading…' : 'not loaded')}
+                      </span>
+                      {llama?.running && llama?.gpu === 'CPU only' && (llama?.runtime?.gpuLayers ?? 0) > 0 ? (
+                        <span className="text-[10px] text-state-warning">
+                          This build has no GPU support, so GPU layers cannot help. Use a CUDA/Vulkan build.
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {/* Who runs the turn. Direct is the default because it streams into this chat
+                        without a CLI or the translating bridge in the middle. */}
+                    <div className="space-y-1 pt-0.5">
+                      <div className="text-[10px] uppercase tracking-wide text-content-dim">Local replies</div>
+                      <div className="flex gap-1.5 flex-wrap">
+                        {([
+                          {
+                            id: 'direct' as const,
+                            label: 'Direct',
+                            hint: 'This app streams from llama.cpp itself: thinking, tools and text as they happen.',
+                          },
+                          {
+                            id: 'claude' as const,
+                            label: 'Claude Code',
+                            hint: 'Hand every turn to the Claude Code CLI through the local bridge. Slower per word, but it inherits the CLI\u2019s own tooling.',
+                          },
+                        ]).map(option => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            onClick={() => void setLlamaRun(option.id)}
+                            aria-pressed={llamaRunner === option.id}
+                            title={option.hint}
+                            className={`rounded border px-2 py-1 text-[11px] transition-colors ${
+                              llamaRunner === option.id
+                                ? 'border-sky-500/40 bg-sky-500/15 text-accent'
+                                : 'border-surface-border text-content-dim hover:bg-surface-hover hover:text-content-main'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-content-dim">
+                        {llamaRunner === 'claude'
+                          ? 'Turns run through the Claude Code CLI: tools and thinking are the CLI\u2019s, and the model must fit its 32k-token system prompt.'
+                          : 'Turns run here: llama.cpp streams the reply, the thought arrives as it is had, and tool requests are executed by this app.'}
+                      </p>
+                    </div>
+
+                    {llamaRuntime ? (
+                      <div className="space-y-2 rounded-lg border border-[var(--border-subtle,#1E293B)] bg-[var(--bg-input,#0D1322)] p-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-[10px] uppercase tracking-wide text-content-dim">Server flags</span>
+                          <span className="text-[10px] text-content-dim">
+                            Applied on the next start; changing one stops a running server.
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                          {runtimeField('Context size', 'contextSize')}
+                          {runtimeField('GPU layers', 'gpuLayers')}
+                          {runtimeField('CPU threads', 'threads')}
+                          {runtimeField('Batch size', 'batchSize')}
+                          {cacheField('Cache K', 'cacheTypeK')}
+                          {cacheField('Cache V', 'cacheTypeV')}
+                        </div>
+
+                        <label className="flex items-start gap-2 text-[11px] text-content-muted">
+                          <input
+                            type="checkbox"
+                            checked={llamaRuntime.flashAttention}
+                            onChange={event =>
+                              setLlamaRuntime(previous =>
+                                previous ? { ...previous, flashAttention: event.target.checked } : previous
+                              )
+                            }
+                            className="mt-0.5 h-3.5 w-3.5 rounded accent-sky-500"
+                          />
+                          <span>
+                            Flash attention
+                            <span className="mt-0.5 block text-[10px] text-content-dim">
+                              Faster and leaner on a card that supports it. Off is the safe choice on an older
+                              GPU or a CPU-only build.
+                            </span>
+                          </span>
+                        </label>
+
+                        <label className="flex flex-col gap-0.5">
+                          <span className="text-[9.5px] uppercase tracking-wide text-content-dim">
+                            Extra arguments
+                          </span>
+                          <input
+                            type="text"
+                            value={llamaRuntime.extraArgs}
+                            onChange={event =>
+                              setLlamaRuntime(previous =>
+                                previous ? { ...previous, extraArgs: event.target.value } : previous
+                              )
+                            }
+                            placeholder="e.g. --temp 0.8 --repeat-penalty 1.1 --mlock"
+                            className="rounded border border-surface-border bg-surface-deep px-1.5 py-1 font-mono text-[11px] text-content-main placeholder:text-content-dim focus:border-sky-500 focus:outline-none"
+                          />
+                        </label>
+
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Button
+                            variant="secondary"
+                            size="xs"
+                            disabled={llamaBusy}
+                            onClick={() => void saveLlamaRuntime()}
+                          >
+                            Save flags
+                          </Button>
+                          <span className="text-[10px] text-content-dim">
+                            0 GPU layers keeps it on the CPU on purpose; 99 means "every layer".
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
 
                     <p className="text-[11px] text-content-dim">
                       {llama?.message ??
@@ -1408,6 +1764,38 @@ export const SettingsView: React.FC = () => {
                         a <code className="font-mono text-accent">llama-server</code> you already have.
                       </p>
                     )}
+
+                    <label className="flex items-start gap-2 pt-0.5 text-[11px] text-content-muted">
+                      <input
+                        type="checkbox"
+                        checked={llama?.runOnRequest !== false}
+                        onChange={event => void setLlamaAutoRun(event.target.checked)}
+                        className="mt-0.5 h-3.5 w-3.5 rounded accent-sky-500"
+                      />
+                      <span>
+                        Run a local model automatically when a chat needs one
+                        <span className="mt-0.5 block text-[10px] text-content-dim">
+                          Off: a chat on llama.cpp waits until you press Load in Local models.
+                        </span>
+                      </span>
+                    </label>
+
+                    <label className="flex items-start gap-2 pt-0.5 text-[11px] text-content-muted">
+                      <input
+                        type="checkbox"
+                        checked={llama?.allowMultiple === true}
+                        onChange={event => void setLlamaMulti(event.target.checked)}
+                        className="mt-0.5 h-3.5 w-3.5 rounded accent-sky-500"
+                      />
+                      <span>
+                        Allow more than one model loaded at once
+                        <span className="mt-0.5 block text-[10px] text-content-dim">
+                          Off: loading a model replaces the one in memory, so only one llama.cpp server
+                          ever runs. On: router mode keeps several loaded, which costs the memory of each.
+                          Changing this stops the server.
+                        </span>
+                      </span>
+                    </label>
 
                     {llamaUpdate?.message ? (
                       <p

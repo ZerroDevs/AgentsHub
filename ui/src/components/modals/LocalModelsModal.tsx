@@ -11,6 +11,9 @@ import {
   Loader2,
   RefreshCw,
   AlertCircle,
+  Power,
+  Pencil,
+  Check,
 } from 'lucide-react';
 import { webviewBridge } from '../../services/webviewBridge';
 import { Button } from '../common/Button';
@@ -131,10 +134,17 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
   const [tab, setTab] = useState<'shelf' | 'hub'>('shelf');
   const [models, setModels] = useState<LocalModel[]>([]);
   const [directory, setDirectory] = useState('');
+  const [defaultDirectory, setDefaultDirectory] = useState('');
+  const [usingDefaultDirectory, setUsingDefaultDirectory] = useState(true);
   const [memory, setMemory] = useState<{ vramMb: number; ramMb: number } | null>(null);
+  const [server, setServer] = useState<any | null>(null);
+  const [loadedPath, setLoadedPath] = useState('');
+  const [runOnRequest, setRunOnRequest] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   const [query, setQuery] = useState('');
   const [bucket, setBucket] = useState('all');
@@ -153,9 +163,82 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
       const res: any = await webviewBridge.invoke('local_models_list');
       setModels(res?.models ?? []);
       setDirectory(res?.directory ?? '');
+      setDefaultDirectory(res?.defaultDirectory ?? '');
+      setUsingDefaultDirectory(res?.usingDefaultDirectory !== false);
       setMemory(res?.memory ?? null);
+      setServer(res?.server ?? null);
+      setLoadedPath(res?.loadedModel ?? '');
+      setRunOnRequest(res?.runOnRequest !== false);
     } catch {
       setError('Could not read the model folder.');
+    }
+  };
+
+  /** llama.cpp on or off. Starting it without a model leaves it in router mode: ready, nothing loaded. */
+  const toggleServer = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res: any = await webviewBridge.invoke(server?.running ? 'llamacpp_stop' : 'llamacpp_start');
+      setServer(res?.status ?? res);
+      setLoadedPath((res?.status ?? res)?.loadedModel ?? '');
+      void loadModels();
+    } catch {
+      setError('The local server did not change state.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unload = async () => {
+    setBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke('local_models_unload');
+      setModels(res?.models ?? []);
+      setServer(res?.server ?? null);
+      setLoadedPath('');
+      setNotice('Model unloaded. Its memory is free again.');
+    } catch {
+      setError('The model could not be unloaded.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const commitRename = async (model: LocalModel) => {
+    const name = renameDraft.trim();
+    setRenaming(null);
+    setRenameDraft('');
+
+    try {
+      const res: any = await webviewBridge.invoke('local_models_rename', { path: model.path, name });
+      if (res?.models) setModels(res.models);
+      if (!res?.success) setError('The model could not be renamed.');
+    } catch {
+      setError('The model could not be renamed.');
+    }
+  };
+
+  const chooseDownloadFolder = async () => {
+    try {
+      const res: any = await webviewBridge.invoke('local_models_pick_download_folder');
+      if (res?.chosen) {
+        setNotice(`Downloads now go to ${res.directory}.`);
+        void loadModels();
+      }
+    } catch {
+      setError('The folder could not be changed.');
+    }
+  };
+
+  const useDefaultDownloadFolder = async () => {
+    try {
+      const res: any = await webviewBridge.invoke('local_models_reset_download_folder');
+      setNotice('Downloads go to the app\u2019s own folder again.');
+      if (res?.models) setModels(res.models);
+      void loadModels();
+    } catch {
+      setError('The folder could not be changed.');
     }
   };
 
@@ -197,9 +280,14 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
       }
     });
 
+    // The server can be started from a chat or from Settings while this dialog is open, so the rows'
+    // Load/Unload buttons follow it instead of waiting for Refresh.
+    const offServer = webviewBridge.on('local_server_changed', () => void loadModels());
+
     return () => {
       offProgress?.();
       offDone?.();
+      offServer?.();
     };
   }, []);
 
@@ -277,7 +365,10 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
     try {
       const res: any = await webviewBridge.invoke('local_models_run', { path: model.path });
       if (res?.success) {
-        setNotice(`${model.name} is running. Start a chat from the + menu to use it.`);
+        setNotice(`${model.name} is loaded. Start a chat from the + menu to use it.`);
+        await loadModels();
+        // The chat's composer shows whether anything is serving; it rereads on this event.
+        window.dispatchEvent(new CustomEvent('byok-provider-changed'));
       } else {
         setError(res?.message ?? 'The server did not start.');
       }
@@ -322,10 +413,37 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
           </div>
 
           <div className="flex items-center gap-1.5">
+            <span
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-mono ${
+                server?.running
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-state-success'
+                  : server?.installed
+                    ? 'border-surface-border bg-surface-deep text-content-dim'
+                    : 'border-rose-500/30 bg-rose-500/10 text-state-danger'
+              }`}
+              title={server?.message ?? 'The local llama.cpp server'}
+            >
+              {server?.running ? 'llama.cpp on' : server?.installed ? 'llama.cpp off' : 'no llama.cpp'}
+            </span>
+
+            <button
+              onClick={() => void toggleServer()}
+              disabled={busy || !server?.installed}
+              className="flex h-7 items-center gap-1 rounded-lg border border-surface-border bg-surface-deep px-2 text-[11px] text-content-muted transition-colors hover:text-content-main disabled:opacity-40"
+              title={
+                server?.running
+                  ? 'Stop the llama.cpp server and free the memory it holds'
+                  : 'Start the llama.cpp server without loading a model'
+              }
+            >
+              <Power className="h-3.5 w-3.5" />
+              {server?.running ? 'Stop' : 'Start'}
+            </button>
+
             <button
               onClick={() => void webviewBridge.invoke('local_models_open_folder')}
               className="flex h-7 items-center gap-1 rounded-lg border border-surface-border bg-surface-deep px-2 text-[11px] text-content-muted hover:text-content-main"
-              title="Show the app's model folder"
+              title="Show the folder downloads are saved in"
             >
               <FolderOpen className="h-3.5 w-3.5" />
               Folder
@@ -385,6 +503,16 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
         {tab === 'shelf' && (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="flex flex-wrap items-center gap-1.5 px-4 py-2">
+              <span
+                className="rounded border border-surface-border px-1.5 py-0.5 text-[9.5px] text-content-dim"
+                title={
+                  runOnRequest
+                    ? 'A chat that needs a local model loads the first one on the shelf. Change this in Settings \u2192 AI Engines & Runtimes.'
+                    : 'A chat never loads a model on its own. Press Load on a row first. Change this in Settings \u2192 AI Engines & Runtimes.'
+                }
+              >
+                {runOnRequest ? 'auto-load on' : 'auto-load off'}
+              </span>
               <Button variant="secondary" size="xs" disabled={busy} onClick={() => void addFile()} leftIcon={<FilePlus2 className="h-3 w-3" />}>
                 Add .gguf
               </Button>
@@ -413,9 +541,40 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="truncate text-xs text-content-main" title={model.path}>
-                            {model.name}
-                          </span>
+                          {renaming === model.path ? (
+                            <input
+                              autoFocus
+                              value={renameDraft}
+                              onChange={event => setRenameDraft(event.target.value)}
+                              onBlur={() => void commitRename(model)}
+                              onKeyDown={event => {
+                                if (event.key === 'Enter') void commitRename(model);
+                                if (event.key === 'Escape') {
+                                  setRenaming(null);
+                                  setRenameDraft('');
+                                }
+                              }}
+                              className="min-w-0 flex-1 rounded border border-sky-500 bg-surface-deep px-1.5 py-0.5 text-xs text-content-main focus:outline-none"
+                            />
+                          ) : (
+                            <>
+                              <span className="truncate text-xs text-content-main" title={model.path}>
+                                {model.name}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRenaming(model.path);
+                                  setRenameDraft(model.name);
+                                }}
+                                title="Rename it here. The file on disk keeps its own name."
+                                className="rounded p-0.5 text-content-dim transition-colors hover:bg-surface-hover hover:text-content-main"
+                                aria-label={`Rename ${model.name}`}
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </button>
+                            </>
+                          )}
                           <span className="rounded border border-surface-border px-1 text-[9px] uppercase tracking-wide text-content-dim">
                             {model.origin}
                           </span>
@@ -435,14 +594,35 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
                         </p>
                       </div>
 
-                      <button
-                        onClick={() => void runModel(model)}
-                        disabled={busy}
-                        className="flex h-7 items-center gap-1 rounded-lg bg-emerald-600 px-2 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                      >
-                        <Play className="h-3 w-3" />
-                        Run
-                      </button>
+                      {loadedPath && loadedPath === model.path && server?.running ? (
+                        <>
+                          <span
+                            className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9.5px] text-state-success"
+                            title="This file is answering right now"
+                          >
+                            loaded
+                          </span>
+                          <button
+                            onClick={() => void unload()}
+                            disabled={busy}
+                            className="flex h-7 items-center gap-1 rounded-lg border border-surface-border px-2 text-[11px] text-content-muted hover:border-rose-500/40 hover:text-state-danger disabled:opacity-50"
+                            title="Stop the server and free the memory this model holds"
+                          >
+                            <Power className="h-3 w-3" />
+                            Unload
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => void runModel(model)}
+                          disabled={busy}
+                          className="flex h-7 items-center gap-1 rounded-lg bg-emerald-600 px-2 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                          title={server?.running ? 'Restart the server on this file' : 'Start the server on this file'}
+                        >
+                          <Play className="h-3 w-3" />
+                          Load
+                        </button>
+                      )}
 
                       <button
                         onClick={() => void forget(model)}
@@ -465,6 +645,34 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
         {tab === 'hub' && (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="space-y-2 border-b border-surface-border px-4 py-2">
+              <div className="flex flex-wrap items-center gap-1.5 text-[10.5px]">
+                <span className="text-content-dim">Download to</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-content-muted" title={directory}>
+                  {directory || 'the app folder'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void chooseDownloadFolder()}
+                  className="rounded border border-surface-border px-1.5 py-0.5 text-content-muted transition-colors hover:text-content-main"
+                >
+                  Choose…
+                </button>
+                {usingDefaultDirectory ? (
+                  <span className="text-content-dim" title="Downloads use the app's own models folder">
+                    default
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void useDefaultDownloadFolder()}
+                    className="rounded border border-surface-border px-1.5 py-0.5 text-content-muted transition-colors hover:text-content-main"
+                    title={`Go back to ${defaultDirectory}`}
+                  >
+                    Use default
+                  </button>
+                )}
+              </div>
+
               <div className="flex items-center gap-1.5">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-content-dim" />

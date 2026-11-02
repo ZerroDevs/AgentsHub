@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Check, ChevronDown, KeyRound, Loader2 } from 'lucide-react';
+import { Check, ChevronDown, KeyRound, Loader2, Power } from 'lucide-react';
 import { webviewBridge } from '../../services/webviewBridge';
 import { useSessionStore } from '../../store/useSessionStore';
 
@@ -29,6 +29,33 @@ export const ByokProviderSwitcher: React.FC<{ sessionId: string }> = ({ sessionI
   const [activeId, setActiveId] = useState('');
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState('');
+
+  /** The local server's state, so llama.cpp can be switched on and off from this menu. */
+  const [llamaRunning, setLlamaRunning] = useState<boolean | null>(null);
+  const [llamaBusy, setLlamaBusy] = useState(false);
+
+  const readLlama = useCallback(async () => {
+    try {
+      const state: any = await webviewBridge.invoke('llamacpp_status');
+      setLlamaRunning(Boolean(state?.running));
+    } catch {
+      setLlamaRunning(null);
+    }
+  }, []);
+
+  const toggleLlama = async () => {
+    setLlamaBusy(true);
+    try {
+      const state: any = await webviewBridge.invoke(llamaRunning ? 'llamacpp_stop' : 'llamacpp_start');
+      setLlamaRunning(Boolean((state?.status ?? state)?.running));
+      // Both composer chips reread what they show: the model list is only there while it serves.
+      window.dispatchEvent(new CustomEvent(BYOK_PROVIDER_CHANGED));
+    } catch {
+      void readLlama();
+    } finally {
+      setLlamaBusy(false);
+    }
+  };
 
   const load = useCallback(async (): Promise<ProviderSummary[]> => {
     try {
@@ -60,7 +87,8 @@ export const ByokProviderSwitcher: React.FC<{ sessionId: string }> = ({ sessionI
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void readLlama();
+  }, [load, readLlama]);
 
   useEffect(() => {
     if (!open) return;
@@ -104,6 +132,7 @@ export const ByokProviderSwitcher: React.FC<{ sessionId: string }> = ({ sessionI
         onClick={() => {
           setOpen(previous => !previous);
           void load();
+          void readLlama();
         }}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -134,34 +163,58 @@ export const ByokProviderSwitcher: React.FC<{ sessionId: string }> = ({ sessionI
               providers.map(provider => {
                 const selected = provider.id === activeId;
 
-                return (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={selected}
-                    onClick={() => void choose(provider)}
-                    className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-hover ${
-                      selected ? 'text-content-main' : 'text-content-muted'
-                    }`}
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate text-[11.5px]">{provider.name}</span>
-                      <span className="block truncate text-[10px] text-content-dim">
-                        {!provider.hasKey
-                          ? 'No key yet'
-                          : provider.models > 0
-                            ? `${provider.models} models`
-                            : 'No model list yet'}
-                      </span>
-                    </span>
+                const isLocal = provider.id === 'local_llamacpp';
 
-                    {busy === provider.id ? (
-                      <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin" />
-                    ) : selected ? (
-                      <Check className="h-3 w-3 flex-shrink-0 text-accent" />
+                return (
+                  <div key={provider.id} className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      onClick={() => void choose(provider)}
+                      className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-hover ${
+                        selected ? 'text-content-main' : 'text-content-muted'
+                      }`}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-[11.5px]">{provider.name}</span>
+                        <span className="block truncate text-[10px] text-content-dim">
+                          {isLocal
+                            ? llamaRunning === null
+                              ? 'Local server state unknown'
+                              : llamaRunning
+                                ? 'Server running on this machine'
+                                : 'Server off: switch it on with the power button'
+                            : !provider.hasKey
+                              ? 'No key yet'
+                              : provider.models > 0
+                                ? `${provider.models} models`
+                                : 'No model list yet'}
+                        </span>
+                      </span>
+
+                      {busy === provider.id ? (
+                        <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin" />
+                      ) : selected ? (
+                        <Check className="h-3 w-3 flex-shrink-0 text-accent" />
+                      ) : null}
+                    </button>
+
+                    {isLocal ? (
+                      <button
+                        type="button"
+                        onClick={() => void toggleLlama()}
+                        disabled={llamaBusy}
+                        title={llamaRunning ? 'Turn the local server off' : 'Turn the local server on'}
+                        aria-label={llamaRunning ? 'Stop llama.cpp' : 'Start llama.cpp'}
+                        className={`rounded p-1 transition-colors hover:bg-surface-hover disabled:opacity-40 ${
+                          llamaRunning ? 'text-state-success' : 'text-content-dim'
+                        }`}
+                      >
+                        {llamaBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Power className="h-3 w-3" />}
+                      </button>
                     ) : null}
-                  </button>
+                  </div>
                 );
               })
             )}

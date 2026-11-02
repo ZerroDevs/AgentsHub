@@ -104,11 +104,17 @@ public partial class MainForm : Form
                 Services.LanProxyService.ReadSelectedDirectPorts());
         }
 
-        try
+        // Ports stay closed at launch unless the person asked for background ones. The translating
+        // bridge is opened by the first turn that needs it (ByokEngine and the CLI manager both start
+        // it per use), so starting it here only ever opened 9230 for nothing.
+        if (StartupHelper.GetPreference("BackgroundPortsEnabled", false))
         {
-            ClaudeOpenRouterProxyService.Instance.Start(9230);
+            try
+            {
+                ClaudeOpenRouterProxyService.Instance.Start(9230);
+            }
+            catch { }
         }
-        catch { }
 
         try
         {
@@ -808,6 +814,7 @@ public partial class MainForm : Form
     {
         _isExiting = true;
         UnregisterGlobalHotkey();
+        StopLocalModelServer();
 
         if (_cliManager != null)
         {
@@ -1317,8 +1324,28 @@ public partial class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// A llama.cpp server is a child process, so it outlives this window and keeps the model's memory
+    /// held on the GPU. Closing the app means nothing is left to answer with, so it is stopped here
+    /// instead of being left for the next launch to find and reap.
+    /// </summary>
+    private static void StopLocalModelServer()
+    {
+        try
+        {
+            var llama = Services.LlamaCpp.LlamaCppService.Instance;
+            if (llama.AnyServerRunning) llama.Stop();
+        }
+        catch
+        {
+            // Closing must not fail because a child would not die.
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        StopLocalModelServer();
+
         if (!_isExiting && e.CloseReason == CloseReason.UserClosing)
         {
             var minimizeToTray = StartupHelper.GetPreference("MinimizeToTray", true);

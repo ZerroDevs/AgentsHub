@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom';
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { AlertTriangle, ArrowUp, Brain, Clock, FileCode, Folder, KeyRound, Paperclip, Pencil, Quote, Sparkles, Square, SquareTerminal, Terminal, GitBranch, X, FileText } from 'lucide-react';
+import { AlertTriangle, ArrowUp, Brain, Clock, Cpu, FileCode, Folder, KeyRound, Paperclip, Pencil, Quote, Sparkles, Square, SquareTerminal, Terminal, GitBranch, X, FileText } from 'lucide-react';
 import { ChatAttachment, QueuedPrompt, SlashCommand, TokenUsage } from '../../types/agent';
 import { useSlashCommandStore } from '../../store/useSlashCommandStore';
 import { rankByQuery } from '../../lib/fuzzy';
@@ -15,8 +15,10 @@ import { VyceModelChip } from './VyceModelChip';
 import { OpenCodeModelChip } from './OpenCodeModelChip';
 import { ZaiModelChip } from './ZaiModelChip';
 import { ByokModelChip } from './ByokModelChip';
+import { BYOK_PROVIDER_CHANGED } from './ByokProviderSwitcher';
 import { TokenUsageTooltip } from './TokenUsageTooltip';
 import { CircularQuotaWidget } from './CircularQuotaWidget';
+import { LocalModelsModal } from '../modals/LocalModelsModal';
 
 interface ChatInputProps {
   onSendMessage: (prompt: string, attachments?: ChatAttachment[]) => void;
@@ -80,6 +82,9 @@ function findSlashToken(value: string, caret: number): { start: number; query: s
   if (!match) return null;
   return { start: upto.lastIndexOf('/'), query: match[1] };
 }
+
+/** One decimal below ten: a slow local model's difference between 1.2 and 1.9 matters. */
+const formatRate = (value: number): string => (value < 10 ? value.toFixed(1) : value.toFixed(0));
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
@@ -452,6 +457,106 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const isByok = engine === 'byok';
   /** Vyce is the Vyce Code TUI, driven in a hidden console: no model picker, no policy switch. */
   const isVyce = engine === 'vyce';
+
+  /**
+   * Whether this BYOK chat runs on the model on this machine rather than a pasted key.
+   *
+   * Both are the Claude Code CLI on an OpenAI-shaped endpoint, so the engine is the same, but the
+   * row said "Your key" over a model the person downloaded, which describes the wrong thing.
+   */
+  const [byokIsLocal, setByokIsLocal] = useState(false);
+  const [localServer, setLocalServer] = useState<{ running: boolean; installed: boolean; runOnRequest: boolean } | null>(null);
+  const [localModelsOpen, setLocalModelsOpen] = useState(false);
+  /**
+   * How fast the local model answered: the peak and the average llama.cpp reported for the reply.
+   *
+   * Both come from the server's own timing lines, so neither is inferred from the text arriving.
+   */
+  const [localRate, setLocalRate] = useState<{
+    tps: number;
+    avg: number;
+    tokens: number;
+    streaming: boolean;
+    /** Always true now: the readout only ever shows a number llama.cpp measured. */
+    measured: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!isByok) {
+      setByokIsLocal(false);
+      setLocalServer(null);
+      setLocalRate(null);
+      return;
+    }
+
+    let alive = true;
+    const read = () => {
+      void webviewBridge
+        .invoke('byok_models')
+        .then((res: any) => {
+          if (!alive) return;
+
+          const isLocal = (res?.providerId ?? '') === 'local_llamacpp';
+          setByokIsLocal(isLocal);
+          setLocalServer(isLocal ? (res?.local ?? null) : null);
+
+          const tps = Number(res?.local?.tokensPerSecond ?? 0);
+          const avg = Number(res?.local?.averageTokensPerSecond ?? 0);
+          setLocalRate(isLocal && tps > 0
+            ? { tps, avg, tokens: Number(res?.local?.generatedTokens ?? 0), streaming: false, measured: true }
+            : null);
+        })
+        .catch(() => {});
+    };
+
+    read();
+    window.addEventListener(BYOK_PROVIDER_CHANGED, read);
+
+    // A server started by a send or by Settings changes what this bar should say.
+    const offServer = webviewBridge.on('local_server_changed', read);
+
+    // Two sources feed this: the app's own count while text streams, then the server's measured
+    // timing line. The measured one carries no average, so the turn's average survives it.
+    const offRate = webviewBridge.on('local_model_rate', (payload: any) => {
+      const tps = Number(payload?.tokensPerSecond ?? 0);
+      const avg = Number(payload?.averageTokensPerSecond ?? 0);
+      const tokens = Number(payload?.generatedTokens ?? 0);
+      const streaming = payload?.streaming === true;
+      const measured = payload?.estimated !== true;
+
+      setLocalRate(prev => {
+        if (tps <= 0 && avg <= 0) return prev;
+
+        return {
+          tps: tps > 0 ? tps : prev?.tps ?? 0,
+          avg: avg > 0 ? avg : prev?.avg ?? 0,
+          tokens: tokens > 0 ? tokens : prev?.tokens ?? 0,
+          streaming,
+          measured,
+        };
+      });
+    });
+
+    return () => {
+      alive = false;
+      window.removeEventListener(BYOK_PROVIDER_CHANGED, read);
+      offServer?.();
+      offRate?.();
+    };
+  }, [isByok]);
+
+  /**
+   * What this chat cannot do yet. A local model is a file someone has to load, so the composer says
+   * so instead of sending a turn at a port with nothing behind it.
+   */
+  const localNotice = !byokIsLocal
+    ? null
+    : localServer && !localServer.installed
+      ? 'llama.cpp is not installed. Add it in Settings → AI Engines & Runtimes.'        : localServer && !localServer.running
+        ? localServer.runOnRequest
+          ? 'The local server is off. Your first message starts it with the first model on the shelf.'
+          : 'Local models do not start on their own. Open Local models and press Load.'
+        : null;
   /** One-time hint that a guest account is the weaker way to use Qwen. */
   // sessionStorage, not localStorage: a guest who dismissed the hint once should not lose it
   // forever, and being signed out is a state that changes.
@@ -534,6 +639,32 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         className="hidden"
         accept="image/*,.txt,.md,.json,.js,.jsx,.ts,.tsx,.py,.cs,.html,.css,.yml,.yaml,.sh,.cmd,.bat,.log,*"
       />
+
+      {localModelsOpen ? (
+        <LocalModelsModal
+          onClose={() => {
+            setLocalModelsOpen(false);
+            // Loading a model happens inside the dialog, so this is where the bar learns to go away.
+            window.dispatchEvent(new CustomEvent(BYOK_PROVIDER_CHANGED));
+          }}
+        />
+      ) : null}
+
+      {localNotice ? (
+        <div className="mb-2 flex w-full items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-state-warning">
+          <Cpu className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="min-w-0 flex-1">{localNotice}</span>
+          {localServer?.installed ? (
+            <button
+              type="button"
+              onClick={() => setLocalModelsOpen(true)}
+              className="flex-shrink-0 rounded border border-amber-500/40 px-1.5 py-0.5 font-mono text-[10px] transition-colors hover:bg-amber-500/15"
+            >
+              Local models
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="relative w-full">
         {isPaletteOpen ? (
@@ -940,10 +1071,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <>
                 <span
                   className="flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[11px] text-amber-400"
-                  title="Answers come from the Claude Code CLI, on the key and base URL you added"
+                  title={
+                    byokIsLocal
+                      ? 'Answers come from llama.cpp, running the model on this machine'
+                      : 'Answers come from the Claude Code CLI, on the key and base URL you added'
+                  }
                 >
-                  <KeyRound className="h-3 w-3" />
-                  Your key
+                  {byokIsLocal ? <Cpu className="h-3 w-3" /> : <KeyRound className="h-3 w-3" />}
+                  {byokIsLocal ? 'Local' : 'Your key'}
                 </span>
 
                 <span className="opacity-30">|</span>
@@ -1035,6 +1170,28 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {isDeepSeek || isQwen || isZai || isVyce || isOpenCode || isByok ? null : (
               <CircularQuotaWidget profileName={profileName} />
             )}
+
+            {byokIsLocal && localRate ? (
+              <>
+                <span
+                  title={`llama.cpp measured this for its last reply${
+                    localRate.tokens > 0 ? ` (${localRate.tokens} tokens generated)` : ''
+                  }.`}
+                  className="flex cursor-help items-baseline rounded font-mono text-[10.5px] tabular-nums text-content-dim"
+                >
+                  {formatRate(localRate.tps)} t/s
+                </span>
+
+                {localRate.avg > 0 ? (
+                  <span
+                    title="llama.cpp's own average for that reply: every generated token divided by the generation time. Lower than the peak because the first tokens are slower; prompt reading is not counted in either."
+                    className="flex cursor-help items-baseline rounded font-mono text-[10.5px] tabular-nums text-content-dim"
+                  >
+                    avg {formatRate(localRate.avg)}
+                  </span>
+                ) : null}
+              </>
+            ) : null}
 
             {turnTokens > 0 ? (
               <TokenUsageTooltip turn={lastTurnTokens} session={sessionTokens} turns={turnCount} />

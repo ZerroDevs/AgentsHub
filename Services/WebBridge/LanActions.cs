@@ -362,6 +362,9 @@ public sealed partial class DashboardWebBridge : IDisposable
             ? $"&k={proxy.AccessToken}"
             : string.Empty;
 
+    /// <summary>True while the Claude Code terminal page is actually bound on 9229.</summary>
+    private bool ClaudeTerminalListening => _cliManager.WebTerminalServer.IsListening(9229);
+
     private List<object> GetRunningWebPorts(string lanIp, int hubPort, int lanProxyPort)
     {
         string themeParam = $"?theme={(ThemeManager.CurrentTheme == AppTheme.Light ? "light" : "dark")}&accent={Uri.EscapeDataString(ThemeManager.AccentHex)}";
@@ -386,8 +389,10 @@ public sealed partial class DashboardWebBridge : IDisposable
                 lanPort = 9229,
                 localUrl = $"http://127.0.0.1:9229/{themeParam}",
                 lanUrl = $"http://{lanIp}:9229/{themeParam}",
-                state = "Running",
-                isRunning = true
+                // Read from the listener, not assumed: nothing is bound on 9229 until a CLI session
+                // needs its terminal page, so a constant here claimed an open port that did not exist.
+                state = ClaudeTerminalListening ? "Running" : "Stopped",
+                isRunning = ClaudeTerminalListening
             }
         };
 

@@ -10,9 +10,19 @@ interface ByokState {
   providerId: string;
   providerName: string;
   models: string[];
+  /** Display names for local ids, which are file paths or repository names. */
+  modelLabels: Record<string, string>;
   selectedModel: string;
   hasKey: boolean;
+  isLocal: boolean;
+  local: { running: boolean; loadedModel: string } | null;
 }
+
+/**
+ * A local id is a file path when it names a model file; a router's ids are repository names, and
+ * those have nothing to load — the server picks them up from the request.
+ */
+const looksLikeFile = (id: string): boolean => id.toLowerCase().endsWith('.gguf');
 
 const chipClass =
   'flex items-center gap-1.5 rounded-lg border border-surface-border bg-surface-card px-2 py-1 font-mono text-[11px] text-content-muted transition-colors hover:border-amber-500/50 hover:text-content-main';
@@ -33,6 +43,8 @@ export const ByokModelChip: React.FC<{ sessionId: string; model?: string }> = ({
   const [state, setState] = useState<ByokState | null>(null);
   const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null);
   const [busy, setBusy] = useState(false);
+  /** The model this chip is loading, so the row says what is happening during a slow start. */
+  const [loading, setLoading] = useState('');
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   /**
@@ -57,14 +69,26 @@ export const ByokModelChip: React.FC<{ sessionId: string; model?: string }> = ({
         providerId: res?.providerId ?? '',
         providerName: res?.providerName ?? 'Custom provider',
         models: Array.isArray(res?.models) ? res.models : [],
+        modelLabels: res?.modelLabels && typeof res.modelLabels === 'object' ? res.modelLabels : {},
         selectedModel: res?.selectedModel ?? '',
         hasKey: Boolean(res?.hasKey),
+        isLocal: Boolean(res?.isLocal),
+        local: res?.local ?? null,
       };
 
       setState(next);
       return next;
     } catch {
-      setState({ providerId: '', providerName: 'Custom provider', models: [], selectedModel: '', hasKey: false });
+      setState({
+        providerId: '',
+        providerName: 'Custom provider',
+        models: [],
+        modelLabels: {},
+        selectedModel: '',
+        hasKey: false,
+        isLocal: false,
+        local: null,
+      });
       return undefined;
     }
   };
@@ -147,14 +171,38 @@ export const ByokModelChip: React.FC<{ sessionId: string; model?: string }> = ({
     await load();
   };
 
-  const choose = (entry: string) => {
+  /**
+   * Picks a model, loading it first when it is a local file that is not the one being served.
+   *
+   * A file server answers for exactly one model at a time, so choosing another file has to swap it;
+   * selecting the id alone sent turns at a model that was not loaded.
+   */
+  const choose = async (entry: string) => {
     setAnchor(null);
-    updateSessionTelemetry(sessionId, { model: entry });
+
+    const needsLoad = state?.isLocal && looksLikeFile(entry) && entry !== state?.local?.loadedModel;
+    let model = entry;
+
+    if (needsLoad) {
+      setLoading(state?.modelLabels?.[entry] ?? entry);
+      try {
+        const res: any = await webviewBridge.invoke('local_models_run', { path: entry });
+        if (res?.success && res?.model) model = res.model;
+      } catch {
+        // The choice is still recorded; the composer says the server is not answering.
+      } finally {
+        setLoading('');
+      }
+    }
+
+    updateSessionTelemetry(sessionId, { model });
 
     // Remembered on the provider too, so the next session starts on the model this one used.
     if (state?.providerId) {
-      void webviewBridge.invoke('claude_gateway_set_model', { providerId: state.providerId, model: entry }).catch(() => {});
+      void webviewBridge.invoke('claude_gateway_set_model', { providerId: state.providerId, model }).catch(() => {});
     }
+
+    if (needsLoad) await load();
   };
 
   /** Re-asks the provider. The stored key is reused, so nothing is retyped. */
@@ -172,7 +220,10 @@ export const ByokModelChip: React.FC<{ sessionId: string; model?: string }> = ({
     }
   };
 
-  const label = current || state?.providerName || 'Custom provider';
+  /** The name to show for an id. Local ids are paths, so the label is what makes them readable. */
+  const labelFor = (id: string) => state?.modelLabels?.[id] || id;
+  const label = current ? labelFor(current) : state?.providerName || 'Custom provider';
+  const loadedId = state?.isLocal ? state?.local?.loadedModel ?? '' : '';
 
   return (
     <>
@@ -184,7 +235,7 @@ export const ByokModelChip: React.FC<{ sessionId: string; model?: string }> = ({
         className={chipClass}
       >
         <KeyRound className="h-3 w-3 flex-shrink-0 text-amber-400" />
-        <span className="max-w-[160px] truncate">{label}</span>
+        <span className="max-w-[160px] truncate">{loading ? `loading ${loading}…` : label}</span>
         <ChevronUp className={`h-3 w-3 opacity-60 transition-transform ${anchor ? 'rotate-180' : ''}`} />
       </button>
 
@@ -222,12 +273,22 @@ export const ByokModelChip: React.FC<{ sessionId: string; model?: string }> = ({
                         key={entry}
                         type="button"
                         role="menuitem"
-                        onClick={() => choose(entry)}
+                        onClick={() => void choose(entry)}
                         className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[11px] transition-colors hover:bg-surface-hover ${
                           entry === current ? 'text-amber-400' : 'text-content-muted'
                         }`}
                       >
-                        <span className="truncate">{entry}</span>
+                        <span className="min-w-0 flex-1 truncate" title={entry}>
+                          {labelFor(entry)}
+                        </span>
+                        {entry === loadedId ? (
+                          <span
+                            className="flex-shrink-0 rounded border border-emerald-500/30 bg-emerald-500/10 px-1 text-[9px] text-state-success"
+                            title="This file is the one llama.cpp is serving"
+                          >
+                            loaded
+                          </span>
+                        ) : null}
                         {entry === current ? <Check className="h-3 w-3 flex-shrink-0" /> : null}
                       </button>
                     ))}

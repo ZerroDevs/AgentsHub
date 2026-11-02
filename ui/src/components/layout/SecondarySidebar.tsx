@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom';
 import { useSidecarStore } from '../../store/useSidecarStore';
 import { webviewBridge } from '../../services/webviewBridge';
 import { engineIcons } from '../../lib/toolIcons';
+import { BYOK_PROVIDER_CHANGED } from '../chat/ByokProviderSwitcher';
 import { BackendSessionItem, WorkspaceFileItem } from '../../types/agent';
 
 interface SecondarySidebarProps {
@@ -143,22 +144,31 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
    * A local chat needs something to answer with before the session exists. This starts the local
    * server, and if no model is loaded it runs the first one on the shelf instead of opening a chat
    * that would fail on its first message.
+   *
+   * The session opens first and the server work runs behind it: loading a model takes seconds to
+   * minutes, and making the click wait for that made the whole menu feel stuck.
    */
-  const startLocalModelSession = async (workspaceId: string | null) => {
-    try {
-      const state: any = await webviewBridge.invoke('llamacpp_use');
-      const loaded = state?.provider?.models ?? [];
-
-      if (loaded.length === 0) {
-        const shelf: any = await webviewBridge.invoke('local_models_list');
-        const first = shelf?.models?.[0];
-        if (first?.path) await webviewBridge.invoke('local_models_run', { path: first.path });
-      }
-    } catch {
-      // The chat carries its own error state; a toast here would only duplicate it.
-    }
-
+  const startLocalModelSession = (workspaceId: string | null) => {
     startSession(workspaceId, 'byok');
+
+    void (async () => {
+      try {
+        const state: any = await webviewBridge.invoke('llamacpp_use');
+        const loaded = state?.provider?.models ?? [];
+
+        if (loaded.length === 0) {
+          const shelf: any = await webviewBridge.invoke('local_models_list');
+          const first = shelf?.models?.[0];
+          if (first?.path) await webviewBridge.invoke('local_models_run', { path: first.path });
+        }
+      } catch {
+        // The chat carries its own error state; a toast here would only duplicate it.
+      } finally {
+        // The provider became local while the composer was already on screen. Both chips reread it
+        // from this event: otherwise the session still says "Your key" and offers the old models.
+        window.dispatchEvent(new CustomEvent(BYOK_PROVIDER_CHANGED));
+      }
+    })();
   };
 
   // Merge active local sessions with backend sessions
