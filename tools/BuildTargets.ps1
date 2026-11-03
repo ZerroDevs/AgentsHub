@@ -34,6 +34,12 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = (Get-Item "$scriptDir\..").FullName
 Set-Location $rootDir
 
+# VERSION is the single source. Mirror it into the package.json files and the README / SECURITY
+# version lines before packaging, so the tree this script leaves behind is the one it built.
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    & node (Join-Path $rootDir "tools/sync-version.mjs")
+}
+
 if (-not $OutputDir) {
     $OutputDir = Join-Path $rootDir "dist"
 }

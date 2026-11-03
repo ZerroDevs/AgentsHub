@@ -1,5 +1,5 @@
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 
 const events: any[] = [];
 const q = new TaskQueue(2, (e: any) => events.push(e));

@@ -1,10 +1,21 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import fs from 'node:fs';
 import path from 'path';
+
+// VERSION at the repo root is the app version. Baked into the bundle so every label in the UI
+// reports the same number as the assembly, the installer and the update check.
+const appVersion = fs
+  .readFileSync(path.resolve(__dirname, '../VERSION'), 'utf8')
+  .trim()
+  .replace(/^[vV]\s*/, '');
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
   base: './', // Critical for WebView2 / file / local virtual host mapping
   resolve: {
     alias: {

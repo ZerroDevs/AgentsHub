@@ -48,7 +48,7 @@ export const SidecarHealthPill: React.FC<SidecarHealthPillProps> = ({ health, on
       </div>
       <div className="flex items-center justify-between gap-4 text-content-muted pt-1 border-t border-surface-border">
         <span>Protocol:</span>
-        <span className="text-content-muted">{health.version || 'v2.0.0'}</span>
+        <span className="text-content-muted">{health.version || `v${__APP_VERSION__}`}</span>
       </div>
     </div>
   );

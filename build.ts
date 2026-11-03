@@ -66,7 +66,7 @@ async function compileTarget(target: TargetConfig, rootDir: string): Promise<boo
     mkdirSync(outDir, { recursive: true });
   }
 
-  const entryPoint = resolve(rootDir, 'src/engine.ts');
+  const entryPoint = resolve(rootDir, 'sidecar/engine.ts');
 
   console.log(`\n[\x1b[36m*\x1b[0m] Compiling ${target.description}...`);
   console.log(`    Target:  ${target.bunTarget}`);

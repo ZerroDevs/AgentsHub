@@ -80,6 +80,10 @@ public partial class MainForm : Form
     {
         ThemeManager.Initialize();
 
+        // Attachments are temp files; one left by a crash is not worth keeping, and the folder they
+        // live in is otherwise never cleaned.
+        Services.AttachmentStore.Sweep(TimeSpan.FromDays(1));
+
         // Load Ports and Config
         var savedEnginePort = StartupHelper.GetIntPreference("EnginePort", HubProcessService.DefaultHubPort);
         var savedLanPort = StartupHelper.GetIntPreference("LanPort", 9191);
@@ -655,7 +659,11 @@ public partial class MainForm : Form
             }
             else if (info.Result == UpdateCheckResult.UpToDate)
             {
-                ShowTrayBalloon("Agents Hub", $"You are up to date! (v{info.CurrentVersion})");
+                // The updater's own sentence covers the case the short one gets wrong: a build whose
+                // number is ahead of every release is not "up to date", it is off the release line.
+                ShowTrayBalloon("Agents Hub", string.IsNullOrEmpty(info.Message)
+                    ? $"You are up to date! (v{info.CurrentVersion})"
+                    : info.Message);
             }
             else if (info.Result == UpdateCheckResult.NoReleasesFound)
             {

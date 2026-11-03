@@ -1,6 +1,6 @@
 import { createPortal } from 'react-dom';
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { AlertTriangle, ArrowUp, Brain, Clock, Cpu, FileCode, Folder, KeyRound, Paperclip, Pencil, Quote, Sparkles, Square, SquareTerminal, Terminal, GitBranch, X, FileText } from 'lucide-react';
+import { AlertCircle, AlertTriangle, ArrowUp, Brain, Clock, Cpu, FileCode, Folder, KeyRound, Paperclip, Pencil, Quote, Sparkles, Square, SquareTerminal, Terminal, GitBranch, X, FileText } from 'lucide-react';
 import { ChatAttachment, QueuedPrompt, SlashCommand, TokenUsage } from '../../types/agent';
 import { useSlashCommandStore } from '../../store/useSlashCommandStore';
 import { rankByQuery } from '../../lib/fuzzy';
@@ -9,6 +9,7 @@ import { ModelSelector } from './ModelSelector';
 import { QwenModeChip, QwenModelChip } from './QwenPickers';
 import { useSessionStore } from '../../store/useSessionStore';
 import { webviewBridge } from '../../services/webviewBridge';
+import { uploadAttachment } from '../../services/attachmentUpload';
 import { ImageLightbox } from './ImageLightbox';
 import { PermissionModeButton } from './PermissionModeButton';
 import { VyceModelChip } from './VyceModelChip';
@@ -126,6 +127,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     return () => window.removeEventListener('agentshub:quote', onQuote);
   }, []);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  /** A file the composer refused, said out loud instead of dropped on the floor. */
+  const [attachNotice, setAttachNotice] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Set briefly when a blocked send is attempted, so the notice visibly reacts instead of doing nothing.
@@ -252,54 +255,83 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     textareaRef.current?.focus();
   };
 
-  const processFiles = (files: FileList | File[]) => {
-    const fileArray = Array.from(files);
-    fileArray.forEach(file => {
-      const isImg = file.type.startsWith('image/');
-      const reader = new FileReader();
+  /** Past this the upload would be a few minutes of slices; refusing is kinder than hanging. */
+  const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
-      if (isImg) {
-        reader.onload = e => {
-          const dataUrl = e.target?.result as string;
-          const newAtt: ChatAttachment = {
-            id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            name: file.name,
-            size: file.size,
-            type: file.type,
-            isImage: true,
-            dataUrl,
-          };
-          setAttachments(prev => [...prev, newAtt]);
+  /** A thumbnail is a preview, not a copy: only small images keep one. */
+  const IMAGE_PREVIEW_BYTES = 2 * 1024 * 1024;
+
+  const processFiles = (files: FileList | File[]) => {
+    const localVisionMissing = byokIsLocal && localServer !== null && localServer.visionReady === false;
+
+    Array.from(files).forEach(file => {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachNotice(`${file.name} is ${formatFileSize(file.size)}; attachments are capped at 64 MB.`);
+        return;
+      }
+
+      if (file.size === 0) {
+        setAttachNotice(`${file.name} is empty, so there is nothing to send.`);
+        return;
+      }
+
+      const isImage = file.type.startsWith('image/');
+
+      // An image on a projector-less local model is refused before the turn rather than after it.
+      if (isImage && localVisionMissing) {
+        setAttachNotice(
+          'The local model that is loaded has no vision projector, so it cannot read an image. ' +
+            'Add the mmproj file in Local models → Flags, load it again, or attach a text file instead.'
+        );
+        return;
+      }
+
+      const id = `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const attachment: ChatAttachment = {
+        id,
+        name: file.name,
+        size: file.size,
+        type: file.type || 'application/octet-stream',
+        isImage,
+        uploading: true,
+      };
+
+      setAttachments(prev => [...prev, attachment]);
+
+      // Only a small image is read here, and only for its thumbnail; everything else goes to the
+      // host in slices, so no large file is ever held as one string in the page.
+      if (isImage && file.size <= IMAGE_PREVIEW_BYTES) {
+        const reader = new FileReader();
+        reader.onload = event => {
+          const dataUrl = event.target?.result as string;
+          if (!dataUrl) return;
+
+          setAttachments(prev => prev.map(item => (item.id === id ? { ...item, dataUrl } : item)));
         };
         reader.readAsDataURL(file);
-      } else {
-        // Read text preview for code/text files if under 2MB
-        if (file.size < 2 * 1024 * 1024) {
-          reader.onload = e => {
-            const text = e.target?.result as string;
-            const newAtt: ChatAttachment = {
-              id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-              name: file.name,
-              size: file.size,
-              type: file.type || 'text/plain',
-              isImage: false,
-              dataUrl: text ? `data:text/plain;base64,${btoa(unescape(encodeURIComponent(text)))}` : undefined,
-            };
-            setAttachments(prev => [...prev, newAtt]);
-          };
-          reader.readAsText(file);
-        } else {
-          const newAtt: ChatAttachment = {
-            id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            name: file.name,
-            size: file.size,
-            type: file.type || 'application/octet-stream',
-            isImage: false,
-          };
-          setAttachments(prev => [...prev, newAtt]);
-        }
       }
+
+      void uploadAttachment(file)
+        .then(path =>
+          setAttachments(prev => prev.map(item => (item.id === id ? { ...item, path, uploading: false } : item)))
+        )
+        .catch((error: unknown) => {
+          setAttachments(prev => prev.filter(item => item.id !== id));
+          setAttachNotice(
+            `${file.name} could not be attached: ${error instanceof Error ? error.message : 'the upload failed.'}`
+          );
+        });
     });
+  };
+
+  /** Asks a web engine's page whether it really exposes a file input, instead of guessing. */
+  const checkUpload = async () => {
+    try {
+      const res: any = await webviewBridge.invoke('web_upload_probe', { engine });
+      setAttachNotice(res?.detail ?? 'The page did not answer.');
+    } catch (error: unknown) {
+      setAttachNotice(error instanceof Error ? error.message : 'The upload check could not run.');
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -409,6 +441,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // No `isExecuting` guard: a send during a turn is queued by the caller rather than dropped.
     if (!text && attachments.length === 0) return;
 
+    // A path that does not exist yet cannot be handed to an engine.
+    if (attachments.some(attachment => attachment.uploading)) {
+      setAttachNotice('An attachment is still uploading. Send again in a moment.');
+      return;
+    }
+
+    // An attachment restored from storage has a name and no file behind it. Sending would claim a
+    // file the engine never receives, so it is named instead.
+    if (attachments.some(attachment => !attachment.path)) {
+      setAttachNotice(
+        'That attachment was saved before a reload and has no file behind it. Remove it and attach the file again.'
+      );
+      return;
+    }
+
     if (blockedNotice) {
       setIsNudging(true);
       window.setTimeout(() => setIsNudging(false), 1600);
@@ -465,7 +512,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
    * row said "Your key" over a model the person downloaded, which describes the wrong thing.
    */
   const [byokIsLocal, setByokIsLocal] = useState(false);
-  const [localServer, setLocalServer] = useState<{ running: boolean; installed: boolean; runOnRequest: boolean } | null>(null);
+  const [localServer, setLocalServer] = useState<{
+    running: boolean;
+    installed: boolean;
+    runOnRequest: boolean;
+    /** False when the loaded model was started without its mmproj, so images cannot be read. */
+    visionReady?: boolean;
+  } | null>(null);
   const [localModelsOpen, setLocalModelsOpen] = useState(false);
   /**
    * How fast the local model answered: the peak and the average llama.cpp reported for the reply.
@@ -820,6 +873,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         ) : null}
 
+        {attachNotice ? (
+          <div className="flex items-center gap-2 border-b border-amber-500/25 bg-amber-500/10 px-3.5 py-1.5 text-[11px] text-state-warning" role="status">
+            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+            <span className="flex-1">{attachNotice}</span>
+            <button
+              type="button"
+              onClick={() => setAttachNotice(null)}
+              className="text-content-dim hover:text-content-main"
+              aria-label="Dismiss"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        ) : null}
+
         {/* Attached Files Preview Bar */}
         {attachments.length > 0 && (
           <div className="flex flex-wrap items-center gap-2 px-3.5 pt-3 pb-1 border-b border-surface-border/40 max-h-36 overflow-y-auto">
@@ -845,7 +913,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     {att.name}
                   </div>
                   <div className="text-[9.5px] font-mono text-content-dim">
-                    {formatFileSize(att.size)}
+                    {att.uploading ? 'uploading…' : formatFileSize(att.size)}
                   </div>
                 </div>
                 <button
@@ -998,6 +1066,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 </span>
               )}
             </button>
+
+            {(engine === 'qwen' || engine === 'zai') ? (
+              <button
+                type="button"
+                onClick={() => void checkUpload()}
+                className="rounded px-1 py-0.5 text-[10px] text-content-dim transition hover:bg-surface-hover hover:text-content-main"
+                title="Ask this page whether it exposes a file input, so a failed attachment is diagnosable"
+              >
+                check upload
+              </button>
+            ) : null}
 
             <span className="opacity-30">|</span>
 

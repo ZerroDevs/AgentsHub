@@ -101,7 +101,11 @@ export interface ChatAttachment {
   size: number;
   type?: string;
   isImage: boolean;
+  /** A small data URL for the thumbnail only; the file itself lives on disk. */
   dataUrl?: string;
+  /** Where the host wrote the bytes. Sending uses this, not the bytes. */
+  path?: string;
+  uploading?: boolean;
 }
 
 export interface ChatMessage {

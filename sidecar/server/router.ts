@@ -9,6 +9,7 @@ import { ShellExecutor } from '../tools/executor.ts';
 import { FsTools } from '../tools/fsTools.ts';
 import { PtyRunner } from '../tools/ptyRunner.ts';
 import { SessionManager } from '../session/sessionManager.ts';
+import { APP_VERSION } from '../appVersion.ts';
 
 export class MessageRouter {
   private queue: TaskQueue;
@@ -53,7 +54,7 @@ export class MessageRouter {
           pid: process.pid,
           activeSessionsCount: this.sessionManager.getActiveSessionsCount(),
           uptimeSec: Math.round(process.uptime()),
-          version: '2.0.0',
+          version: APP_VERSION,
           timestamp: new Date().toISOString()
         });
         break;

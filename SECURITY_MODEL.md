@@ -57,7 +57,7 @@ metadata from GitHub. The same user's other processes are not a boundary: they c
   against the published digest when one exists. Enforced by: `UpdateService.IsTrustedReleaseUrl` and
   `UpdateService.DownloadAndInstallAsync`.
 - **INV-9** The sidecar accepts no client when its token is empty, and compares tokens in constant
-  time. Enforced by: `tokenMatch` and `safeEqual` in `src/server/transport.ts`.
+  time. Enforced by: `tokenMatch` and `safeEqual` in `sidecar/server/transport.ts`.
 - **INV-10** Skill content and workspace snapshots stay inside their own roots. Enforced by:
   `McpSkillsService.SaveSkillContentAsync`, `McpSkillsService.DeleteProjectSkill` and
   `WorkspaceSnapshotService`.

@@ -8,8 +8,8 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 
 const args = process.argv.slice(2);
 function flag(name: string): string | undefined {

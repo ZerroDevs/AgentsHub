@@ -619,4 +619,213 @@ public sealed partial class DashboardWebBridge : IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>Largest file the viewer will open, so one click cannot load a log dump into the page.</summary>
+    private const int MaxViewerBytes = 1_048_576;
+
+    private Task HandleReadWorkspaceFileAsync(JsonElement data, string? requestId)
+    {
+        if (!TryResolveWorkspaceFile(data, out var fullPath, out var root, out var relative, out var error))
+        {
+            SendResponse(requestId, false, error);
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            if (!File.Exists(fullPath))
+            {
+                SendResponse(requestId, false, $"{relative} does not exist.");
+                return Task.CompletedTask;
+            }
+
+            long size = new FileInfo(fullPath).Length;
+            bool truncated = size > MaxViewerBytes;
+
+            byte[] bytes;
+            using (var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                int take = (int)Math.Min(size, MaxViewerBytes);
+                bytes = new byte[take];
+                int read = 0;
+
+                while (read < take)
+                {
+                    int got = stream.Read(bytes, read, take - read);
+                    if (got <= 0) break;
+                    read += got;
+                }
+
+                if (read < take) Array.Resize(ref bytes, read);
+            }
+
+            // A NUL in the first few KB is the cheap, reliable signal for "this is not text".
+            bool binary = Array.IndexOf(bytes, (byte)0, 0, Math.Min(bytes.Length, 8192)) >= 0;
+
+            SendResponse(requestId, true, new
+            {
+                path = relative,
+                rootPath = root,
+                extension = Path.GetExtension(fullPath).TrimStart('.').ToLowerInvariant(),
+                sizeBytes = size,
+                truncated,
+                binary,
+                text = binary ? string.Empty : DecodeText(bytes)
+            });
+        }
+        catch (Exception ex)
+        {
+            SendResponse(requestId, false, ex.Message);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Writes the editor's contents back to the same file, in the encoding it arrived in.</summary>
+    private Task HandleSaveWorkspaceFileAsync(JsonElement data, string? requestId)
+    {
+        if (!TryResolveWorkspaceFile(data, out var fullPath, out var root, out var relative, out var error))
+        {
+            SendResponse(requestId, false, error);
+            return Task.CompletedTask;
+        }
+
+        string text = data.TryGetProperty("text", out var textProp) ? textProp.GetString() ?? string.Empty : string.Empty;
+
+        if (Encoding.UTF8.GetByteCount(text) > MaxViewerBytes * 4)
+        {
+            SendResponse(requestId, false, "That edit is too large to save from the viewer.");
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            // The viewer only ever saw the first MaxViewerBytes of a file this large, so writing the
+            // editor's buffer back would silently drop the rest of it.
+            if (File.Exists(fullPath) && new FileInfo(fullPath).Length > MaxViewerBytes)
+            {
+                SendResponse(requestId, false, $"{relative} is too large to edit in the viewer.");
+                return Task.CompletedTask;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? root);
+
+            // A UTF-8 BOM is the only marker worth preserving: rewriting a file without it changes
+            // the bytes git sees, and on Windows it changes how some tools read the first line.
+            bool hadBom = false;
+
+            if (File.Exists(fullPath))
+            {
+                var head = new byte[3];
+                using var probe = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                hadBom = probe.Read(head, 0, 3) == 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF;
+            }
+
+            File.WriteAllText(fullPath, text, new UTF8Encoding(hadBom));
+
+            SendResponse(requestId, true, new
+            {
+                saved = true,
+                path = relative,
+                sizeBytes = Encoding.UTF8.GetByteCount(text)
+            });
+        }
+        catch (Exception ex)
+        {
+            SendResponse(requestId, false, ex.Message);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Turns a workspace-relative path into a real one, and refuses anything that escapes the root.
+    ///
+    /// The path arrives from the page, so `..\..\Users\x\.ssh\id_rsa` has to be rejected here rather
+    /// than trusted: this is the only place a user-typed path becomes a file operation.
+    /// </summary>
+    private static bool TryResolveWorkspaceFile(
+        JsonElement data,
+        out string fullPath,
+        out string root,
+        out string relative,
+        out string error)
+    {
+        fullPath = string.Empty;
+        root = string.Empty;
+        relative = string.Empty;
+        error = string.Empty;
+
+        string? requested = data.TryGetProperty("path", out var pathProp) ? pathProp.GetString() : null;
+        if (string.IsNullOrWhiteSpace(requested))
+        {
+            error = "Path is required";
+            return false;
+        }
+
+        string? requestedRoot = data.TryGetProperty("root", out var rootProp) ? rootProp.GetString() : null;
+        if (string.IsNullOrWhiteSpace(requestedRoot))
+        {
+            requestedRoot = AiConfigService.Instance.GetActiveWorkspace()?.WorkingDirectory;
+        }
+
+        if (string.IsNullOrWhiteSpace(requestedRoot) || !Directory.Exists(requestedRoot))
+        {
+            requestedRoot = Directory.GetCurrentDirectory();
+        }
+
+        try
+        {
+            root = Path.GetFullPath(requestedRoot);
+
+            string candidate = Path.IsPathRooted(requested)
+                ? Path.GetFullPath(requested)
+                : Path.GetFullPath(Path.Combine(root, requested.Replace('/', Path.DirectorySeparatorChar)));
+
+            string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            if (!candidate.StartsWith(prefix, comparison))
+            {
+                error = "That path is outside the workspace.";
+                return false;
+            }
+
+            if (Directory.Exists(candidate))
+            {
+                error = $"{requested} is a folder.";
+                return false;
+            }
+
+            fullPath = candidate;
+            relative = Path.GetRelativePath(root, candidate).Replace('\\', '/');
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>UTF-8 unless the file's own BOM says otherwise; invalid bytes become U+FFFD.</summary>
+    private static string DecodeText(byte[] bytes)
+    {
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        {
+            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        }
+
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+        {
+            return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        }
+
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+        {
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+        }
+
+        return Encoding.UTF8.GetString(bytes);
+    }
+
 }

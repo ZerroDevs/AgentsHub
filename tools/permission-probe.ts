@@ -5,8 +5,8 @@
  * question is whether the sidecar promotes a refusal to `permission_denied`, not whether Bun can
  * bind a port. Not part of the build.
  */
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 
 const events: any[] = [];
 const emit = (event: any) => {

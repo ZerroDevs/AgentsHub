@@ -9,11 +9,95 @@ import { useSessionStore } from './useSessionStore';
 import { useProfileStore } from './useProfileStore';
 import { useWorkspaceStore } from './useWorkspaceStore';
 import { useRepositoriesStore } from './useRepositoriesStore';
+import { useSettingsStore } from './useSettingsStore';
 import { revokeRule } from '../lib/permissionRules';
+import { DEFAULT_RAIL_SHORTCUTS, conflictingView } from '../lib/railShortcuts';
 import { logUi } from '../services/uiLogger';
 
 /** One flush per page load: conversation grants from the previous run are revoked exactly once. */
 let conversationRulesFlushed = false;
+
+/** Every view the rail can show. One list, so a saved order can never name a view that does not exist. */
+const VIEW_IDS: ActiveView[] = ['chat', 'profiles', 'mcpskills', 'dashboard', 'repositories', 'settings'];
+
+/** Display name per view, shared by the rail's tooltips and the Settings checklist. */
+export const RAIL_VIEW_LABELS: Record<ActiveView, string> = {
+  chat: 'Chat',
+  profiles: 'AccountsHub',
+  mcpskills: 'MCP & Skills',
+  dashboard: 'Dashboard',
+  repositories: 'Git',
+  settings: 'Settings',
+};
+
+/** Settings cannot be hidden: it holds the list that would bring it back. */
+const UNHIDEABLE: ActiveView = 'settings';
+
+/**
+ * Rail order, as first shipped: talk to the agent, pick what it runs as and what it may use, then the
+ * two overviews, then settings. A saved order replaces this; a new view added later is appended.
+ */
+const DEFAULT_RAIL_ORDER: ActiveView[] = VIEW_IDS;
+
+/** Saved bindings, filled in with the shipped default for any view the file does not mention. */
+function loadRailShortcuts(): Record<ActiveView, string> {
+  const defaults = { ...DEFAULT_RAIL_SHORTCUTS };
+
+  try {
+    const raw = localStorage.getItem('agents_hub_rail_shortcuts');
+    if (!raw) return defaults;
+
+    const saved: unknown = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return defaults;
+
+    for (const id of VIEW_IDS) {
+      const value = (saved as Record<string, unknown>)[id];
+      // An empty string is a deliberate "no shortcut", so it is kept rather than defaulted over.
+      if (typeof value === 'string') defaults[id] = value;
+    }
+  } catch {
+    // A damaged value falls back to the defaults.
+  }
+
+  return defaults;
+}
+
+function loadHiddenRailViews(): ActiveView[] {
+  try {
+    const raw = localStorage.getItem('agents_hub_rail_hidden');
+    if (!raw) return [];
+
+    const saved: unknown = JSON.parse(raw);
+    if (!Array.isArray(saved)) return [];
+
+    return [
+      ...new Set(
+        saved.filter(
+          (id): id is ActiveView => typeof id === 'string' && VIEW_IDS.includes(id as ActiveView) && id !== UNHIDEABLE
+        )
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function loadRailOrder(): ActiveView[] {
+  try {
+    const raw = localStorage.getItem('agents_hub_rail_order');
+    if (!raw) return DEFAULT_RAIL_ORDER;
+
+    const saved: unknown = JSON.parse(raw);
+    if (!Array.isArray(saved)) return DEFAULT_RAIL_ORDER;
+
+    // Keep only real views, drop repeats, then append whatever the saved order predates.
+    const kept = saved.filter((id): id is ActiveView => typeof id === 'string' && VIEW_IDS.includes(id as ActiveView));
+    const unique = [...new Set(kept)];
+    return [...unique, ...VIEW_IDS.filter(id => !unique.includes(id))];
+  } catch {
+    return DEFAULT_RAIL_ORDER;
+  }
+}
 
 interface SidecarStoreState {
   health: SidecarHealth;
@@ -26,6 +110,13 @@ interface SidecarStoreState {
   isSidebarCollapsed: boolean;
   /** The icon rail, collapsed independently of the secondary panel. */
   isRailCollapsed: boolean;
+  /** Order of the rail's view buttons, as the user arranged them. */
+  railOrder: ActiveView[];
+  /** Views the user took off the rail. The view itself still works; it just has no icon. */
+  hiddenRailViews: ActiveView[];
+  /** Off until the user turns it on in Settings. */
+  railShortcutsEnabled: boolean;
+  railShortcuts: Record<ActiveView, string>;
   isBridgeConnected: boolean;
 
   // Actions
@@ -35,6 +126,14 @@ interface SidecarStoreState {
   toggleSidebar: () => void;
   toggleRail: () => void;
   setRailCollapsed: (collapsed: boolean) => void;
+  setRailOrder: (order: ActiveView[]) => void;
+  resetRailOrder: () => void;
+  toggleRailViewHidden: (id: ActiveView) => void;
+  showAllRailViews: () => void;
+  setRailShortcutsEnabled: (enabled: boolean) => void;
+  /** Binds a key, taking it from whichever view held it. Returns that view, if there was one. */
+  setRailShortcut: (id: ActiveView, shortcut: string) => ActiveView | null;
+  resetRailShortcuts: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   initBridgeListeners: () => () => void;
   refreshSidecarStatus: () => Promise<void>;
@@ -49,14 +148,12 @@ export const useSidecarStore = create<SidecarStoreState>((set, get) => ({
     isOnline: false,
     latencyMs: 0,
     activeSessions: 0,
-    version: 'v2.0.0',
+    version: `v${__APP_VERSION__}`,
   },
   activeView: (function (): ActiveView {
     try {
       const v = localStorage.getItem('agents_hub_active_view') as ActiveView;
-      if (['chat', 'dashboard', 'repositories', 'profiles', 'mcpskills', 'settings'].includes(v)) {
-        return v;
-      }
+      if (VIEW_IDS.includes(v)) return v;
     } catch {}
     return 'chat';
   })(),
@@ -80,6 +177,16 @@ export const useSidecarStore = create<SidecarStoreState>((set, get) => ({
       return false;
     }
   })(),
+  railOrder: loadRailOrder(),
+  hiddenRailViews: loadHiddenRailViews(),
+  railShortcutsEnabled: (function (): boolean {
+    try {
+      return localStorage.getItem('agents_hub_rail_shortcuts_on') === 'true';
+    } catch {
+      return false;
+    }
+  })(),
+  railShortcuts: loadRailShortcuts(),
   isBridgeConnected: false,
 
   setHealth: healthUpdate =>
@@ -127,6 +234,71 @@ export const useSidecarStore = create<SidecarStoreState>((set, get) => ({
     set({ isSidebarCollapsed: collapsed });
   },
 
+  setRailOrder: order => {
+    try {
+      localStorage.setItem('agents_hub_rail_order', JSON.stringify(order));
+    } catch {}
+    set({ railOrder: order });
+  },
+
+  resetRailOrder: () => {
+    try {
+      localStorage.removeItem('agents_hub_rail_order');
+    } catch {}
+    set({ railOrder: DEFAULT_RAIL_ORDER });
+  },
+
+  toggleRailViewHidden: id => {
+    if (id === UNHIDEABLE) return;
+
+    const current = get().hiddenRailViews;
+    const next = current.includes(id) ? current.filter(view => view !== id) : [...current, id];
+
+    try {
+      localStorage.setItem('agents_hub_rail_hidden', JSON.stringify(next));
+    } catch {}
+    set({ hiddenRailViews: next });
+  },
+
+  showAllRailViews: () => {
+    try {
+      localStorage.removeItem('agents_hub_rail_hidden');
+    } catch {}
+    set({ hiddenRailViews: [] });
+  },
+
+  setRailShortcutsEnabled: enabled => {
+    try {
+      localStorage.setItem('agents_hub_rail_shortcuts_on', String(enabled));
+    } catch {}
+    set({ railShortcutsEnabled: enabled });
+  },
+
+  setRailShortcut: (id, shortcut) => {
+    const current = get().railShortcuts;
+    const displaced = conflictingView(current, id, shortcut);
+
+    const next = { ...current, [id]: shortcut };
+
+    // Hand the old binding to the view that lost its key, so a swap leaves neither view dead. When
+    // the view being edited had no key, the displaced view simply ends up unbound.
+    if (displaced) next[displaced] = current[id];
+
+    try {
+      localStorage.setItem('agents_hub_rail_shortcuts', JSON.stringify(next));
+    } catch {}
+    set({ railShortcuts: next });
+
+    return displaced;
+  },
+
+  resetRailShortcuts: () => {
+    try {
+      localStorage.removeItem('agents_hub_rail_shortcuts');
+    } catch {}
+    set({ railShortcuts: { ...DEFAULT_RAIL_SHORTCUTS } });
+  },
+
   refreshSidecarStatus: async () => {
     try {
       const res = await webviewBridge.invoke('get_sidecar_status');
@@ -138,7 +310,7 @@ export const useSidecarStore = create<SidecarStoreState>((set, get) => ({
           isOnline: !!res.isOnline,
           latencyMs: res.latencyMs || 1,
           activeSessions: res.activeSessions || 0,
-          version: res.version || 'v2.0.0',
+          version: res.version || `v${__APP_VERSION__}`,
         });
       }
     } catch (err) {
@@ -150,6 +322,10 @@ export const useSidecarStore = create<SidecarStoreState>((set, get) => ({
     try {
       const res = await webviewBridge.invoke('get_initial_state');
       if (res) {
+        // The host reads its own assembly version; the About card and the updater would otherwise
+        // each carry a stale literal that no release ever updates.
+        if (res.version) useSettingsStore.getState().setAppVersion(String(res.version));
+
         // Hydrate workspaces
         if (Array.isArray(res.workspaces)) {
           useWorkspaceStore.getState().setWorkspacesData(res.workspaces, res.activeWorkspaceId);
@@ -202,7 +378,7 @@ export const useSidecarStore = create<SidecarStoreState>((set, get) => ({
           isOnline: !!data.isOnline,
           latencyMs: data.latencyMs || 1,
           activeSessions: data.activeSessions || 0,
-          version: data.version || 'v2.0.0',
+          version: data.version || `v${__APP_VERSION__}`,
           error: data.error,
         });
       })

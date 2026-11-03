@@ -253,8 +253,9 @@ public sealed class ClaudeOpenRouterProxyService : IDisposable
 
             // The pool belongs to the provider, not to whoever called in. A caller key is only used
             // when the provider has none: the CLI reaches this port with whatever token the app told
-            // it to send, and that token is not the upstream secret.
-            if (keysPool.Count == 0)
+            // it to send, and that token is not the upstream secret. The key is non-empty here — the
+            // guard above already refused the request when both sides had nothing.
+            if (keysPool.Count == 0 && !string.IsNullOrWhiteSpace(headerApiKey))
             {
                 keysPool.Add(headerApiKey);
             }

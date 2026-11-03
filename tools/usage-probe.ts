@@ -2,8 +2,8 @@
  * Prints the usage `agy` reports for a short conversation, one line per turn.
  * Tells apart "baseline context is expensive" from "the numbers are cumulative".
  */
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 
 const prompts = process.argv.slice(2);
 const events: any[] = [];

@@ -120,7 +120,7 @@ if (existsSync(customCliPath)) {
 // -------------------------------------------------------------
 // 5. Session Manager Path Hardcoding Audit
 // -------------------------------------------------------------
-const sessionMgrPath = join(rootDir, 'src', 'session', 'sessionManager.ts');
+const sessionMgrPath = join(rootDir, 'sidecar', 'session', 'sessionManager.ts');
 if (existsSync(sessionMgrPath)) {
   const content = readFileSync(sessionMgrPath, 'utf8');
   const hasResolveAgy = content.includes('resolveAgyCommand') && content.includes('/opt/homebrew/bin/agy');

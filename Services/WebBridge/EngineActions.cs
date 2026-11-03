@@ -170,6 +170,30 @@ public sealed partial class DashboardWebBridge : IDisposable
     /// the guide, executes the blocks it gets back inside the working directory, and reports each
     /// step as a timeline node. Nothing here is Z.ai specific beyond the transport.
     /// </summary>
+    /// <summary>
+    /// Asks a web engine's page whether it actually exposes an upload control.
+    ///
+    /// Attaching depends on the page's markup, which this app does not own. When a file fails to
+    /// arrive, this answers whether the control was ever there.
+    /// </summary>
+    private async Task HandleWebUploadProbeAsync(JsonElement data, string? requestId)
+    {
+        string engine = data.TryGetProperty("engine", out var engineEl) ? engineEl.GetString() ?? string.Empty : string.Empty;
+
+        try
+        {
+            string detail = string.Equals(engine, "zai", StringComparison.OrdinalIgnoreCase)
+                ? await Services.Zai.ZaiEngine.Instance.ProbeUploadAsync().ConfigureAwait(false)
+                : await Services.Qwen.QwenEngine.Instance.ProbeUploadAsync().ConfigureAwait(false);
+
+            SendResponse(requestId, true, new { detail });
+        }
+        catch (Exception ex)
+        {
+            SendResponse(requestId, false, ex.Message);
+        }
+    }
+
     private async Task DispatchZaiAsync(
         string sessionId,
         string prompt,
@@ -178,7 +202,8 @@ public sealed partial class DashboardWebBridge : IDisposable
         bool skipPermissions,
         string? profile,
         bool toolsAllowed,
-        string? model = null)
+        string? model = null,
+        List<string>? attachmentFiles = null)
     {
         var cts = new CancellationTokenSource();
         _zaiRuns[sessionId] = cts;
@@ -344,7 +369,9 @@ public sealed partial class DashboardWebBridge : IDisposable
                         conversationId = id,
                         timestamp = Now(),
                     });
-                }, toolsAllowed, cts.Token)
+                }, toolsAllowed,
+                attachmentFiles is { Count: > 0 } ? attachmentFiles : null,
+                cts.Token)
                 .ConfigureAwait(false);
 
             PostEventToUi("thinking", new
@@ -433,7 +460,9 @@ public sealed partial class DashboardWebBridge : IDisposable
         string? conversationId,
         string? cwd,
         bool skipPermissions,
-        string? model)
+        string? model,
+        List<string>? attachmentFiles = null,
+        List<(string MimeType, string Base64)>? images = null)
     {
         static string Now() => DateTime.UtcNow.ToString("O");
 
@@ -468,8 +497,15 @@ public sealed partial class DashboardWebBridge : IDisposable
         if (runsLocally
             && string.Equals(Services.LlamaCpp.LlamaCppService.Instance.Runner, "direct", StringComparison.OrdinalIgnoreCase))
         {
-            await DispatchLocalDirectAsync(sessionId, prompt, conversationId, cwd, skipPermissions, model).ConfigureAwait(false);
+            await DispatchLocalDirectAsync(sessionId, prompt, conversationId, cwd, skipPermissions, model, images, attachmentFiles).ConfigureAwait(false);
             return;
+        }
+
+        // The CLI opens files itself, so a path is enough; an image it cannot read is not silently
+        // dropped either — the prompt names what came with it.
+        if (attachmentFiles is { Count: > 0 })
+        {
+            prompt += "\n\nAttached files:\n" + string.Join("\n", attachmentFiles.Select(file => "- " + file));
         }
 #endif
 
@@ -621,11 +657,17 @@ public sealed partial class DashboardWebBridge : IDisposable
         string? conversationId,
         string? cwd,
         bool skipPermissions,
-        string? model)
+        string? model,
+        List<(string MimeType, string Base64)>? images = null,
+        List<string>? attachmentFiles = null)
     {
         static string Now() => DateTime.UtcNow.ToString("O");
 
         var engine = Services.LlamaCpp.LocalChatEngine.Instance;
+
+        // Images travel inline; everything else is named by path, which a local model can open with
+        // its own file tools. Quietly dropping a PDF was the worst of the three options.
+        var localPrompt = prompt + AttachmentNote(attachmentFiles?.Where(file => !IsImagePath(file)).ToList());
         var turnStarted = DateTime.UtcNow;
 
         string root = string.IsNullOrWhiteSpace(cwd)
@@ -723,7 +765,17 @@ public sealed partial class DashboardWebBridge : IDisposable
         try
         {
             var turn = await engine
-                .SendAsync(prompt, root, model, conversationId, skipPermissions, progress, OnThinking, Approve, OnTool)
+                .SendAsync(
+                    localPrompt,
+                    root,
+                    model,
+                    conversationId,
+                    skipPermissions,
+                    progress,
+                    OnThinking,
+                    Approve,
+                    OnTool,
+                    images is { Count: > 0 } ? [.. images.Select(i => new Services.LlamaCpp.LocalImage(i.MimeType, i.Base64))] : null)
                 .ConfigureAwait(false);
 
             CloseThinking();

@@ -66,7 +66,7 @@ Thank you for your interest in contributing to Agents Hub! This document provide
   - `CliWebTerminalServer.cs`: Loopback terminal pages and their WebSocket, guarded by a per-endpoint token.
   - `AntigravityProfileService.cs`: Multi-account credential isolation and VirtualHome directory sandboxing.
   - `ClaudeOpenRouterProxyService.cs`: Anthropic Messages to OpenAI translation gateway proxy.
-- **`src/`**: Bun sidecar engine (`engine.ts`, `server/`, `session/`, `tools/`), built by `build.ts` for all six architectures.
+- **`sidecar/`**: Bun sidecar engine (`engine.ts`, `server/`, `session/`, `tools/`), built by `build.ts` for all six architectures.
 - **`ui/`**: React and TypeScript single-page app served inside WebView2:
   - `src/views/`: Screens such as `DashboardView.tsx`, `SettingsView.tsx`, `ProfilesView.tsx`.
   - `src/components/`: Panels, modals and shared controls.

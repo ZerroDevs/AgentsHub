@@ -7,8 +7,8 @@
  *
  * Runs the sidecar's own SessionManager in-process. Not part of the build.
  */
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 
 const cwd = 'C:/Users/Gaming/AppData/Local/Temp/cwdprobe';
 

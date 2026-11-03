@@ -56,6 +56,9 @@ public sealed partial class DashboardWebBridge : IDisposable
                 ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
                 : cwd;
 
+            // Vyce's console only accepts typed text, so the files are named by path.
+            string vycePrompt = prompt + AttachmentNote(AttachmentFilesForTurn(data));
+
             PostEventToUi("session_status", new { sessionId, state = "running", timestamp = DateTime.UtcNow.ToString("O") });
 
             var vyceProgress = new Progress<string>(text =>
@@ -76,7 +79,7 @@ public sealed partial class DashboardWebBridge : IDisposable
                 try
                 {
                     var reply = await Services.Vyce.VyceEngine.Instance
-                        .SendAsync(prompt, vyceRoot, vyceProgress)
+                        .SendAsync(vycePrompt, vyceRoot, vyceProgress)
                         .ConfigureAwait(false);
 
                     PostEventToUi("chat_final", new
@@ -141,7 +144,7 @@ public sealed partial class DashboardWebBridge : IDisposable
                 ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
                 : cwd;
 
-            var openFiles = MaterialiseAttachments(data);
+            var openFiles = AttachmentFilesForTurn(data);
 
             // A headless run rejects every permission request it cannot ask about, so the
             // profile's full-access switch is what decides whether tools may run at all.
@@ -254,11 +257,16 @@ public sealed partial class DashboardWebBridge : IDisposable
         {
             string? byokModel = model;
 
+            // A local model reads an image inline, so the bytes travel with the request. The CLI path
+            // gets the files as paths instead, because the CLI can open them itself.
+            var byokFiles = AttachmentFilesForTurn(data);
+            var byokImages = ImageAttachments(byokFiles);
+
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await DispatchByokAsync(sessionId, prompt, conversationId, cwd, skipPermissions, byokModel)
+                    await DispatchByokAsync(sessionId, prompt, conversationId, cwd, skipPermissions, byokModel, byokFiles, byokImages)
                         .ConfigureAwait(false);
                 }
                 catch (Exception ex)
@@ -283,12 +291,13 @@ public sealed partial class DashboardWebBridge : IDisposable
             // rounds and take minutes, and awaiting it here would trip the UI's request timeout.
             bool zaiTools = !data.TryGetProperty("toolsEnabled", out var ztElem) || ztElem.ValueKind != JsonValueKind.False;
             string? zaiModel = data.TryGetProperty("model", out var zmElem) ? zmElem.GetString() : null;
+            var zaiFiles = AttachmentFilesForTurn(data);
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await DispatchZaiAsync(sessionId, prompt, conversationId, cwd, skipPermissions, profile, zaiTools, zaiModel)
+                    await DispatchZaiAsync(sessionId, prompt, conversationId, cwd, skipPermissions, profile, zaiTools, zaiModel, zaiFiles)
                         .ConfigureAwait(false);
                 }
                 catch (Exception ex)
@@ -321,7 +330,7 @@ public sealed partial class DashboardWebBridge : IDisposable
             // web chat starts in, so an older session keeps behaving as it did.
             bool deepThink = !data.TryGetProperty("deepThink", out var dtElem) || dtElem.ValueKind != JsonValueKind.False;
             bool webSearch = data.TryGetProperty("webSearch", out var wsElem) && wsElem.ValueKind == JsonValueKind.True;
-            var attachmentFiles = MaterialiseAttachments(data);
+            var attachmentFiles = AttachmentFilesForTurn(data);
 
             _ = Task.Run(async () =>
             {
@@ -354,6 +363,7 @@ public sealed partial class DashboardWebBridge : IDisposable
             string? qRoot = data.TryGetProperty("workingDirectory", out var qwd) ? qwd.GetString() : null;
             bool dataQwenTools = data.TryGetProperty("toolsEnabled", out var qte) && qte.ValueKind == JsonValueKind.False;
             bool qSkip = skipPermissions;
+            var qwenFiles = AttachmentFilesForTurn(data);
 
             // The same approval card DeepSeek uses, resolved by the same response action,
             // so a Qwen turn can write a file once the user approves it.
@@ -445,7 +455,8 @@ public sealed partial class DashboardWebBridge : IDisposable
                                 sessionId,
                                 conversationId = id,
                                 timestamp = DateTime.UtcNow.ToString("O"),
-                            }))
+                            }),
+                            qwenFiles.Count > 0 ? qwenFiles : null)
                         .ConfigureAwait(false);
 
                     // Settle the transcript. Streaming appends, so whatever it showed
@@ -499,7 +510,13 @@ public sealed partial class DashboardWebBridge : IDisposable
         }
 #endif
 
-        await Sidecar.SidecarHostService.Instance.SendChatAsync(sessionId, prompt, model, profile, cwd, effort, skipPermissions, conversationId).ConfigureAwait(false);
+        // The CLI engines (Claude Code, Antigravity, the sidecar itself) take a prompt and nothing
+        // else, so the attachments travel as the paths they were written to. A CLI opens a file with
+        // its own tools, which is why a note is enough there — and why dropping them was not.
+        var turnFiles = AttachmentFilesForTurn(data);
+        string cliPrompt = prompt + AttachmentNote(turnFiles);
+
+        await Sidecar.SidecarHostService.Instance.SendChatAsync(sessionId, cliPrompt, model, profile, cwd, effort, skipPermissions, conversationId).ConfigureAwait(false);
         SendResponse(requestId, true, new { sent = true, sessionId });
     }
 
@@ -632,6 +649,26 @@ public sealed partial class DashboardWebBridge : IDisposable
         return Task.CompletedTask;
     }
 
+#if DEEPSEEK_UI
+    /// <summary>
+    /// Forgets a local conversation's history on disk. The page deletes the session itself; this is
+    /// the other half, so a chat removed in the UI does not leave its thread file behind forever.
+    /// </summary>
+    private void HandleLocalChatForget(JsonElement data, string? requestId)
+    {
+        string? conversationId = data.TryGetProperty("conversationId", out var idProp) ? idProp.GetString() : null;
+
+        if (string.IsNullOrWhiteSpace(conversationId))
+        {
+            SendResponse(requestId, false, "A conversation id is required.");
+            return;
+        }
+
+        Services.LlamaCpp.LocalChatEngine.Instance.Forget(conversationId);
+        SendResponse(requestId, true, new { success = true });
+    }
+#endif
+
     private async Task HandleInjectSessionContextAsync(JsonElement data, string? requestId)
     {
         string? repoPath = data.TryGetProperty("repoPath", out var rProp) ? rProp.GetString() : null;
@@ -761,7 +798,91 @@ public sealed partial class DashboardWebBridge : IDisposable
     }
 #endif
 
-#if DEEPSEEK_UI
+    /// <summary>
+    /// A note listing the attachment paths, for an engine that can only be handed text.
+    ///
+    /// Claude Code, Antigravity and Vyce open any path with their own tools, so naming the file is
+    /// enough — and without the note the composer's paperclip did nothing for those engines.
+    /// </summary>
+    private static string AttachmentNote(IReadOnlyList<string>? files)
+    {
+        if (files is null || files.Count == 0) return string.Empty;
+
+        var note = new StringBuilder("\n\nAttached files (read them from these paths):");
+        foreach (string file in files) note.Append("\n- ").Append(file);
+
+        return note.ToString();
+    }
+
+    /// <summary>True for the types a local model is given inline, rather than as a path to open.</summary>
+    private static bool IsImagePath(string path) => Path.GetExtension(path).ToLowerInvariant() is
+        ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp";
+
+    /// <summary>
+    /// The paths this turn carries.
+    ///
+    /// The page uploads in slices and sends the resulting paths, which is what every engine wants. A
+    /// client that reloaded mid-send, or an older build, may still send data URLs; those are written
+    /// out here so no attachment is silently lost.
+    /// </summary>
+    private static List<string> AttachmentFilesForTurn(JsonElement data)
+    {
+        var files = new List<string>();
+
+        if (data.TryGetProperty("attachmentPaths", out var paths) && paths.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in paths.EnumerateArray())
+            {
+                string? path = item.ValueKind == JsonValueKind.String
+                    ? item.GetString()
+                    : item.TryGetProperty("path", out var pathEl) ? pathEl.GetString() : null;
+
+                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) files.Add(path!);
+            }
+        }
+
+        files.AddRange(MaterialiseAttachments(data));
+        return files;
+    }
+
+    /// <summary>
+    /// The image attachments as base64 pairs, ready for a local model's request body.
+    ///
+    /// Only image files count: a GGUF vision model takes pixels and nothing else, and a text file is
+    /// better handed to it as a path it can open with a tool.
+    /// </summary>
+    private static List<(string MimeType, string Base64)> ImageAttachments(IReadOnlyList<string> files)
+    {
+        var images = new List<(string MimeType, string Base64)>();
+
+        foreach (string path in files)
+        {
+            if (!IsImagePath(path)) continue;
+
+            try
+            {
+                images.Add((MimeFor(path), Convert.ToBase64String(File.ReadAllBytes(path))));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // A file that vanished between upload and send is skipped, not a failed turn.
+            }
+        }
+
+        return images;
+    }
+
+    private static string MimeFor(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".bmp" => "image/bmp",
+        _ => "application/octet-stream"
+    };
+
+    /// <summary>Writes attachments that still arrive as data URLs, so the engines keep one contract: paths.</summary>
     private static List<string> MaterialiseAttachments(JsonElement data)
     {
         var files = new List<string>();
@@ -779,10 +900,7 @@ public sealed partial class DashboardWebBridge : IDisposable
             try
             {
                 var bytes = Convert.FromBase64String(dataUrl[(comma + 1)..]);
-                string safe = string.Concat(name.Split(Path.GetInvalidFileNameChars()));
-                string temp = Path.Combine(Path.GetTempPath(), $"agentshub-attach-{Guid.NewGuid():N}-{safe}");
-                File.WriteAllBytes(temp, bytes);
-                files.Add(temp);
+                files.Add(AttachmentStore.Write(name, bytes));
             }
             catch (FormatException)
             {
@@ -792,6 +910,5 @@ public sealed partial class DashboardWebBridge : IDisposable
 
         return files;
     }
-#endif
 
 }

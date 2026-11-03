@@ -23,6 +23,7 @@ import { classifyTool, extractCommand, extractPath, normaliseOutput } from '../l
 import { migrateTimelineNodes } from '../lib/timelineMigration';
 import { useWorkspaceStore } from './useWorkspaceStore';
 import { isUnsetProfile } from '../lib/profileName';
+import { webviewBridge } from '../services/webviewBridge';
 
 const STORAGE_KEY_SESSIONS = 'agentshub_sessions_v2';
 
@@ -640,6 +641,16 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   },
 
   deleteSession: (sessionId: string) => {
+    // A local chat keeps the model's own copy of the thread on disk, keyed by conversation id. The
+    // page cannot reach that file, so the host is told here; a deleted chat that left it behind
+    // would grow the folder by one file per chat, forever.
+    const removedConversationId = get().sessions[sessionId]?.conversationId;
+    if (removedConversationId) {
+      void webviewBridge.invoke('local_chat_forget', { conversationId: removedConversationId }).catch(() => {
+        // A thread file that outlives the app is cleaned up by the host's own age sweep.
+      });
+    }
+
     // A conversation-scoped grant dies with its conversation.
     const scopedRules = get().conversationRules[sessionId] ?? [];
     if (scopedRules.length > 0) {
@@ -661,6 +672,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
           isTitleCustom: false,
           titleLocked: false,
           messages: [],
+          // The cleared transcript is a new conversation; keeping the old id would resume it.
+          conversationId: undefined,
           status: 'idle',
           tokens: { inputTokens: 0, outputTokens: 0, thinkingTokens: 0, totalTokens: 0 },
         };
@@ -724,6 +737,16 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
   },
 
   clearSessionMessages: (sessionId: string) => {
+    // Clearing is a new conversation, not just an empty transcript. The engine keeps its own copy —
+    // a local model's thread file, a CLI session id — so those are dropped here too, or the next
+    // message would quietly continue the chat that was just cleared.
+    const clearedConversationId = get().sessions[sessionId]?.conversationId;
+    if (clearedConversationId) {
+      void webviewBridge.invoke('local_chat_forget', { conversationId: clearedConversationId }).catch(() => {
+        // The host sweeps abandoned thread files on its own.
+      });
+    }
+
     set(state => {
       const target = state.sessions[sessionId];
       if (!target) return state;
@@ -733,6 +756,8 @@ export const useSessionStore = create<SessionStoreState>((set, get) => ({
         messages: [],
         status: 'idle',
         activeExecutionCardId: undefined,
+        conversationId: undefined,
+        tokens: { inputTokens: 0, outputTokens: 0, thinkingTokens: 0, totalTokens: 0 },
         updatedAt: Date.now(),
       };
 

@@ -8,9 +8,9 @@
  * Run: bun run tools/watchdog-probe.ts
  */
 import { existsSync } from 'node:fs';
-import { createStartWatchdog, EngineStartTimeout } from '../src/lib/engineWatchdog';
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { createStartWatchdog, EngineStartTimeout } from '../sidecar/lib/engineWatchdog';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 
 const BROKEN_AGY = 'C:/Users/Gaming/AppData/Local/agy/bin/agy.exe.broken-20261029-0007';
 

@@ -37,7 +37,7 @@ public sealed class SidecarHostService : IDisposable
     public int ProcessId => _manager.ProcessId;
     public int LatencyMs => _client.LastPingLatencyMs;
     public int ActiveSessionsCount => _client.ActiveSessionsCount;
-    public string Version => "v2.0.0";
+    public string Version => Helpers.AppInfo.DisplayVersion;
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _activeProfiles = new(StringComparer.OrdinalIgnoreCase);
 

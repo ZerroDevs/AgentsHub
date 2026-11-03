@@ -1,5 +1,5 @@
-import { SessionManager } from '../src/session/sessionManager';
-import { TaskQueue } from '../src/queue/taskQueue';
+import { SessionManager } from '../sidecar/session/sessionManager';
+import { TaskQueue } from '../sidecar/queue/taskQueue';
 const q = new TaskQueue(1, () => {});
 const sm = new SessionManager(q, () => {});
 console.log('AGENTS_PROFILES_DIR =', process.env.AGENTS_PROFILES_DIR || '(unset)');

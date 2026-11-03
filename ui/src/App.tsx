@@ -19,6 +19,8 @@ import { useThemeStore } from './store/useThemeStore';
 import { useSettingsStore } from './store/useSettingsStore';
 import { webviewBridge } from './services/webviewBridge';
 import { installUiLogging } from './services/uiLogger';
+import { matchesShortcut } from './lib/railShortcuts';
+import { ActiveView } from './types/agent';
 
 export const App: React.FC = () => {
   const { activeView, isSidebarCollapsed, isRailCollapsed, initBridgeListeners } = useSidecarStore();
@@ -37,6 +39,24 @@ export const App: React.FC = () => {
       const guide = useGuideStore.getState();
       if (guide.isOpen) guide.close();
       else guide.open();
+    };
+
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Shortcuts for the rail's views. Off until switched on in Settings, and they work for views taken
+  // off the rail as well: hiding an icon should not cost you the panel behind it.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const state = useSidecarStore.getState();
+      if (!state.railShortcutsEnabled || event.repeat) return;
+
+      const match = Object.entries(state.railShortcuts).find(([, shortcut]) => matchesShortcut(event, shortcut));
+      if (!match) return;
+
+      event.preventDefault();
+      state.setActiveView(match[0] as ActiveView);
     };
 
     window.addEventListener('keydown', onKey);

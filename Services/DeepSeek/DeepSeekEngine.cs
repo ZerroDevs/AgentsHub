@@ -470,6 +470,8 @@ public sealed class DeepSeekEngine
         // real question arrived as a plain text follow-up.
         if (attachments is { Count: > 0 })
         {
+            var noUploadControl = new List<string>();
+
             foreach (var file in attachments)
             {
                 try
@@ -478,8 +480,22 @@ public sealed class DeepSeekEngine
                 }
                 catch (Exception ex)
                 {
+                    // A page that has no upload control will not grow one on retry; anything else is
+                    // treated as transient, because a turn lost to a slow render helps nobody.
+                    if (ex.Message.Contains("file input", StringComparison.OrdinalIgnoreCase))
+                    {
+                        noUploadControl.Add(Path.GetFileName(file));
+                    }
+
                     Log($"attach failed {Path.GetFileName(file)}: {ex.Message}");
                 }
+            }
+
+            if (noUploadControl.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"DeepSeek would not take {string.Join(", ", noUploadControl)}: the page has no upload control. " +
+                    "Remove the attachment, or use an engine that accepts files such as Claude Code or OpenCode.");
             }
 
             await Task.Delay(1200, ct).ConfigureAwait(false);

@@ -1,10 +1,10 @@
-# Agents Hub v2.0.0
+# Agents Hub v0.0.120
 
 **Desktop control plane and workspace for AI coding agents, headless CLI runners, and free web models.**
 
 Agents Hub coordinates coding agents across your machine in a single desktop application. Run isolated CLI engines, headless runners, and web-driven models without paid API subscriptions, with a shared chat transcript, tool approval pipeline, visual Git workstation, and Model Context Protocol (MCP) manager.
 
-[![Version: v2.0.0](https://img.shields.io/badge/Version-v2.0.0-2563eb?style=flat-square)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
+[![Version: v0.0.120](https://img.shields.io/badge/Version-v0.0.120-2563eb?style=flat-square)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
 [![GitHub Release](https://img.shields.io/github/v/release/ZerroDevs/AgentsHub?style=flat-square&color=2563eb&label=Release)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
 [![Download Setup](https://img.shields.io/badge/Download-Windows%20Installer%20(.exe)-10b981?style=flat-square&logo=windows)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-3fb950?style=flat-square)](LICENSE)
@@ -94,7 +94,7 @@ The main interface provides six dedicated views:
 ## System Requirements
 
 - **Operating System**: Windows 10 / 11 (64-bit)
-- **Version**: v2.0.0
+- **Version**: v0.0.120
 - **Distribution**: Standalone desktop installer (`.exe`) and portable packages with bundled runtimes. No external framework or runtime installation required.
 
 ---

@@ -44,7 +44,8 @@ public sealed record LlamaCppStatus(
     string Runner,
     string Gpu,
     int IdleUnloadMinutes,
-    int UnloadInSeconds);
+    int UnloadInSeconds,
+    string Backend);
 
 /// <summary>The result of asking GitHub what the newest llama.cpp release is.</summary>
 public sealed record LlamaCppUpdate(
@@ -121,6 +122,13 @@ public sealed class LlamaCppService
     private Process? _server;
     private string _message = "Not started.";
 
+    /// <summary>
+    /// What the installed build offloads to, read from the binary once. Empty until the first probe:
+    /// the shelf shows that as "checking" rather than guessing.
+    /// </summary>
+    private string _backend = string.Empty;
+    private DateTime _backendAt = DateTime.MinValue;
+
     // ---- idle unload ----
 
     private readonly object _idleLock = new();
@@ -140,6 +148,9 @@ public sealed class LlamaCppService
 
     /// <summary>True once the load lines said where the layers went, so the CPU warning is said once.</summary>
     private bool _offloadReported;
+
+    /// <summary>GPU layers the running server was started with, per-model flags included.</summary>
+    private int _startedGpuLayers;
 
     /// <summary>Server output, so Settings → Live Logs shows the same lines the log file does.</summary>
     public event Action<string, string>? LogEmitted;
@@ -355,9 +366,6 @@ public sealed class LlamaCppService
         static int Clamp(int value, int min, int max, int fallback) =>
             value <= 0 ? fallback : Math.Clamp(value, min, max);
 
-        static string Cache(string? value) =>
-            value is "q8_0" or "q5_1" or "q5_0" or "q4_1" or "q4_0" or "f16" or "bf16" or "f32" ? value : "f16";
-
         var fallback = LlamaRuntimeOptions.Default;
 
         return new LlamaRuntimeOptions(
@@ -366,8 +374,8 @@ public sealed class LlamaCppService
             GpuLayers: options.GpuLayers < 0 ? 0 : Math.Min(options.GpuLayers, 512),
             Threads: Clamp(options.Threads, 1, 256, 0),
             BatchSize: Clamp(options.BatchSize, 32, 8192, fallback.BatchSize),
-            CacheTypeK: Cache(options.CacheTypeK),
-            CacheTypeV: Cache(options.CacheTypeV),
+            CacheTypeK: NormalisedCache(options.CacheTypeK),
+            CacheTypeV: NormalisedCache(options.CacheTypeV),
             FlashAttention: options.FlashAttention,
             ExtraArgs: (options.ExtraArgs ?? string.Empty).Trim(),
             // A sampler at 0 would be greedy; 2 is where a model starts inventing words.
@@ -397,6 +405,9 @@ public sealed class LlamaCppService
         {
             _scannedPath = null;
             _scannedAt = DateTime.MinValue;
+            // A different binary can be a different backend, so the cached answer goes with it.
+            _backend = string.Empty;
+            _backendAt = DateTime.MinValue;
             _message = string.IsNullOrWhiteSpace(path) ? "Using automatic detection." : "Using the file you picked.";
         }
     }
@@ -483,6 +494,220 @@ public sealed class LlamaCppService
     /// <summary>Absolute path of the server binary, or empty when none exists.</summary>
     public string ResolvedPath => Resolve()?.Path ?? string.Empty;
 
+    /// <summary>
+    /// The compute backend the installed build will use, asked of the binary instead of inferred from
+    /// the load log. A build without CUDA/Vulkan/Metal spends minutes loading a model onto the CPU,
+    /// and saying so beforehand is the difference between a setting that helps and one that lies.
+    /// </summary>
+    public async Task<string> BackendAsync(CancellationToken ct = default)
+    {
+        var resolved = Resolve();
+        if (resolved == null) return "Not installed";
+
+        if (_backend.Length > 0 && DateTime.UtcNow - _backendAt < TimeSpan.FromMinutes(10)) return _backend;
+
+        string backend = string.Empty;
+        bool listedDevices = false;
+
+        // The vendor front end may not take the flag at all while the server it launches does, so both
+        // are asked before anything is concluded.
+        foreach (string binary in ProbeCandidates(resolved.Path))
+        {
+            var devices = await RunBinaryAsync(binary, "--list-devices", ct).ConfigureAwait(false);
+            if (!devices.Ran) continue;
+
+            listedDevices |= devices.Output.Contains("Available devices", StringComparison.OrdinalIgnoreCase);
+
+            backend = ParseBackend(devices.Output);
+            if (backend.Length > 0) break;
+        }
+
+        if (backend.Length == 0)
+        {
+            // Older builds have no --list-devices; the version banner still names the backends it has.
+            var version = await RunBinaryAsync(resolved.Path, "--version", ct).ConfigureAwait(false);
+            backend = ParseBackend(version.Output);
+        }
+
+        // An empty device list is evidence of a CPU-only build. A binary that refused every probe is
+        // unknown, and calling that "CPU only" would be a guess dressed as a fact.
+        _backend = backend.Length > 0 ? backend : listedDevices ? "CPU only" : "Unknown";
+        _backendAt = DateTime.UtcNow;
+
+        return _backend;
+    }
+
+    /// <summary>
+    /// Puts the server on a GPU build and reports what it ended up with.
+    ///
+    /// The old process is stopped first: its DLLs sit in the folder that gets replaced, and a file
+    /// lock would fail the swap. The model that was loaded is loaded again afterwards, so switching
+    /// builds does not quietly end the session someone was in the middle of.
+    /// </summary>
+    public async Task<(bool Ok, string Message, string Backend, string Path)> InstallGpuBuildAsync(
+        Action<string> report, CancellationToken ct = default)
+    {
+        if (!LlamaGpuBuild.Supported)
+        {
+            return (false,
+                $"llama.cpp publishes no {LlamaGpuBuild.BackendName} build for this platform.",
+                string.Empty, string.Empty);
+        }
+
+        string loaded = LoadedModelPath;
+        bool wasRunning = AnyServerRunning;
+
+        if (wasRunning) Stop();
+
+        try
+        {
+            var (server, plan, device) = await LlamaGpuBuild.InstallAsync(report, ct).ConfigureAwait(false);
+
+            // The custom path wins over detection, so the old CPU build stops answering even though
+            // it is still installed where the vendor put it.
+            SetCustomPath(server);
+
+            string backend = await BackendAsync(ct).ConfigureAwait(false);
+
+            if (loaded.Length > 0 && File.Exists(loaded))
+            {
+                report("Loading the model again on the new build…");
+                await RunModelAsync(loaded, ct).ConfigureAwait(false);
+            }
+
+            bool unusable = backend is "CPU only" or "Unknown";
+            string message = unusable
+                ? $"Installed the {plan.Main.Tag} {plan.Backend} build, but it still reports {backend}."
+                : $"Using the {plan.Main.Tag} {plan.Backend} build: {device}.";
+
+            Emit(unusable ? "warn" : "info", message);
+            return (true, message, backend, server);
+        }
+        catch (Exception ex)
+        {
+            string message = $"The GPU build did not install: {ex.Message}";
+            Emit("error", message);
+
+            // A failure leaves the old build in place, so the model that was running goes back on it
+            // rather than the machine sitting with nothing loaded.
+            if (wasRunning && loaded.Length > 0 && File.Exists(loaded))
+            {
+                try { await RunModelAsync(loaded, ct).ConfigureAwait(false); } catch { }
+            }
+
+            return (false, message, string.Empty, string.Empty);
+        }
+    }
+
+    /// <summary>The binary that was resolved, plus a llama-server beside it when that is a different file.</summary>
+    private static IEnumerable<string> ProbeCandidates(string resolvedPath)
+    {
+        yield return resolvedPath;
+
+        string sibling = string.Empty;
+
+        try
+        {
+            string? folder = Path.GetDirectoryName(resolvedPath);
+            if (!string.IsNullOrEmpty(folder))
+            {
+                sibling = Path.Combine(folder, OperatingSystem.IsWindows() ? "llama-server.exe" : "llama-server");
+            }
+        }
+        catch (ArgumentException)
+        {
+            yield break;
+        }
+
+        if (sibling.Length > 0
+            && File.Exists(sibling)
+            && !string.Equals(sibling, resolvedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return sibling;
+        }
+    }
+
+    /// <summary>Reads a device line, or the compiled-in backend name when the build lists no devices.</summary>
+    private static string ParseBackend(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return string.Empty;
+
+        string[] kinds = ["CUDA", "Vulkan", "Metal", "SYCL", "ROCm", "HIP", "OpenCL"];
+
+        foreach (string raw in output.Split('\n'))
+        {
+            string line = raw.Trim();
+            int colon = line.IndexOf(':');
+            if (colon <= 0) continue;
+
+            string head = line[..colon].Trim();
+
+            foreach (string kind in kinds)
+            {
+                if (!head.StartsWith(kind, StringComparison.OrdinalIgnoreCase)) continue;
+
+                string name = line[(colon + 1)..].Trim();
+                int paren = name.IndexOf('(');
+                if (paren > 0) name = name[..paren].Trim();
+
+                return $"{head} · {(name.Length > 0 ? name : head)}";
+            }
+        }
+
+        foreach (string kind in kinds)
+        {
+            if (output.Contains(kind, StringComparison.OrdinalIgnoreCase)) return $"{kind} build, no device listed";
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// Runs the binary for a line of output. A flag it does not know exits at once, so this is cheap.
+    /// `Ran` separates "answered with nothing" from "refused to run", which are different answers.
+    /// </summary>
+    private static async Task<(string Output, bool Ran)> RunBinaryAsync(string binary, string arguments, CancellationToken ct)
+    {
+        try
+        {
+            var info = new ProcessStartInfo
+            {
+                FileName = binary,
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using var process = Process.Start(info);
+            if (process == null) return (string.Empty, false);
+
+            var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+            var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(6));
+
+            try
+            {
+                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                return (string.Empty, false);
+            }
+
+            string output = string.Concat(await stdout.ConfigureAwait(false), "\n", await stderr.ConfigureAwait(false));
+            return (output, output.Trim().Length > 0);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+        {
+            return (string.Empty, false);
+        }
+    }
+
     public LlamaCppStatus Status()
     {
         var resolved = Resolve();
@@ -511,7 +736,8 @@ public sealed class LlamaCppService
             Runner: Runner,
             Gpu: GpuSummary,
             IdleUnloadMinutes: IdleUnloadMinutes,
-            UnloadInSeconds: running ? SecondsUntilUnload() : 0);
+            UnloadInSeconds: running ? SecondsUntilUnload() : 0,
+            Backend: _backend);
     }
 
     /// <summary>
@@ -564,6 +790,21 @@ public sealed class LlamaCppService
             }
         }
 
+        // Named before the load: a CPU-only build otherwise spends minutes loading a model before the
+        // log admits there was never a device to put it on.
+        // Emitted only when the probe actually ran: repeating it on every load turned a one-time
+        // fact into log noise.
+        bool freshProbe = _backend.Length == 0;
+        string backend = await BackendAsync(ct).ConfigureAwait(false);
+        int requestedLayers = (string.IsNullOrWhiteSpace(target) ? null : LlamaModelLibrary.Instance.FlagsFor(target)?.GpuLayers) ?? Runtime.GpuLayers;
+
+        if (freshProbe && backend == "CPU only" && requestedLayers > 0)
+        {
+            Emit("warn",
+                "This llama.cpp build reports no GPU device, so the GPU layers setting has nothing to run on. " +
+                "A CUDA, Vulkan or Metal build uses the card; a CPU build cannot.");
+        }
+
         int port = EffectivePort;
 
         // A server this app does not own can already own the port — a previous run whose process
@@ -586,6 +827,7 @@ public sealed class LlamaCppService
 
             GpuSummary = string.Empty;
             _offloadReported = false;
+            _startedGpuLayers = requestedLayers;
 
             process = Launch(resolved.Path, port, target, settings);
             process.OutputDataReceived += (_, e) => Forward(e.Data);
@@ -1046,8 +1288,10 @@ public sealed class LlamaCppService
 
             // Upstream has shipped both `b11370` tags and semver ones, so both sides are compared in
             // whatever shape they actually have instead of assuming one.
-            var installedSemver = Semver(installed);
-            var latestSemver = Semver(tag);
+            // The same parser the app's own updater uses: tags that omit a part, carry a v, or add a
+            // suffix are compared as numbers instead of failing into "no update".
+            var installedSemver = AppVersion.TryParse(installed, out var parsedInstalled) ? parsedInstalled : (AppVersion?)null;
+            var latestSemver = AppVersion.TryParse(tag, out var parsedLatest) ? parsedLatest : (AppVersion?)null;
             int latestBuild = BuildNumber(tag);
 
             bool newer;
@@ -1056,9 +1300,9 @@ public sealed class LlamaCppService
 
             if (installedSemver.HasValue && latestSemver.HasValue)
             {
-                newer = CompareSemver(latestSemver.Value, installedSemver.Value) > 0;
-                latest = Format(latestSemver.Value);
-                current = Format(installedSemver.Value);
+                newer = latestSemver.Value.IsNewerThan(installedSemver.Value);
+                latest = $"v{latestSemver.Value}";
+                current = $"v{installedSemver.Value}";
             }
             else if (installedBuild > 0 && latestBuild > 0)
             {
@@ -1311,33 +1555,56 @@ public sealed class LlamaCppService
     {
         var runtime = RuntimeOf(settings);
 
+        // Per-model flags win over the app-wide runtime, field by field: an unset field still means
+        // "whatever the global setting says".
+        var flags = string.IsNullOrWhiteSpace(modelPath) ? null : LlamaModelLibrary.Instance.FlagsFor(modelPath);
+
+        int contextSize = Math.Clamp(flags?.ContextSize ?? runtime.ContextSize, 8192, 1_048_576);
+        int gpuLayers = Math.Clamp(flags?.GpuLayers ?? runtime.GpuLayers, 0, 512);
+        bool flashAttention = flags?.FlashAttention ?? runtime.FlashAttention;
+        string extra = string.IsNullOrWhiteSpace(flags?.ExtraArgs) ? runtime.ExtraArgs : flags!.ExtraArgs!;
+
         var args = new List<string>
         {
             "--port", port.ToString(CultureInfo.InvariantCulture),
 
             // One slot of this size, not four smaller ones: the defaults split the context across
             // slots and leave a single conversation with 4k, which no agent turn fits in.
-            "--ctx-size", runtime.ContextSize.ToString(CultureInfo.InvariantCulture),
+            "--ctx-size", contextSize.ToString(CultureInfo.InvariantCulture),
             "--parallel", "1",
 
-            "--n-gpu-layers", runtime.GpuLayers.ToString(CultureInfo.InvariantCulture),
+            "--n-gpu-layers", gpuLayers.ToString(CultureInfo.InvariantCulture),
 
             // A quantised cache halves the KV-cache memory, which is the difference between a long
             // context fitting on the card and being pushed to the CPU.
-            "--cache-type-k", runtime.CacheTypeK,
-            "--cache-type-v", runtime.CacheTypeV,
+            "--cache-type-k", NormalisedCache(flags?.CacheTypeK ?? runtime.CacheTypeK),
+            "--cache-type-v", NormalisedCache(flags?.CacheTypeV ?? runtime.CacheTypeV),
             "--batch-size", runtime.BatchSize.ToString(CultureInfo.InvariantCulture),
         };
 
         if (runtime.Threads > 0) args.AddRange(["--threads", runtime.Threads.ToString(CultureInfo.InvariantCulture)]);
-        if (runtime.FlashAttention) args.Add("--flash-attn");
+        // A bare `--flash-attn` is not valid on newer builds: the flag takes a value, so the next
+        // argument (the model path) was read as one and the server exited before it could load.
+        if (flashAttention) args.AddRange(["--flash-attn", "on"]);
 
-        if (!string.IsNullOrWhiteSpace(modelPath)) args.AddRange(["-m", modelPath]);
+        if (!string.IsNullOrWhiteSpace(modelPath))
+        {
+            args.AddRange(["-m", modelPath]);
 
-        foreach (string extra in SplitArgs(runtime.ExtraArgs)) args.Add(extra);
+            // A vision model without its projector loads happily and then ignores every image. The
+            // file sits beside the model in a GGUF repo, so it is found rather than asked for.
+            string projector = LlamaModelLibrary.Instance.ProjectorFor(modelPath);
+            if (projector.Length > 0) args.AddRange(["--mmproj", projector]);
+        }
+
+        foreach (string extraArg in SplitArgs(extra)) args.Add(extraArg);
 
         return args;
     }
+
+    /// <summary>One of the cache types llama.cpp accepts; anything else falls back to f16.</summary>
+    private static string NormalisedCache(string? value) =>
+        value is "q8_0" or "q5_1" or "q5_0" or "q4_1" or "q4_0" or "f16" or "bf16" or "f32" ? value : "f16";
 
     /// <summary>Splits the extra-arguments box, keeping quoted paths together.</summary>
     private static IEnumerable<string> SplitArgs(string value)
@@ -1418,9 +1685,16 @@ public sealed class LlamaCppService
     }
 
     /// <summary>
-    /// Reads where the model actually went. llama.cpp says so while loading — `offloaded 29/29 layers
-    /// to CUDA0` — and saying nothing is itself the answer: on a machine it cannot use, every layer
-    /// stays on the CPU and the reply is slow for a reason the person can act on.
+    /// Reads where the model actually went.
+    ///
+    /// Older builds name it — `offloaded 29/29 layers to CUDA0` — and that line is the best answer.
+    /// Newer ones print eight lines in total and say nothing about the offload at all: taking that
+    /// silence as "CPU only" claimed the card was idle while it held 1.4 GB of the model, and the
+    /// warning it raised told people to install the build they were already running.
+    ///
+    /// So the fallback asks the binary instead: a probed CUDA/Vulkan/Metal device plus a positive GPU
+    /// layer count means the layers were requested where they can go. The load still fails outright
+    /// when they do not fit, so this is not a promise the build can break silently.
     /// </summary>
     private void NoteGpu(string line)
     {
@@ -1434,21 +1708,32 @@ public sealed class LlamaCppService
 
         if (_offloadReported) return;
 
-        // A load reported as done with no offload line means there was no device to offload to.
-        if (line.Contains("model loaded", StringComparison.OrdinalIgnoreCase))
+        if (!line.Contains("model loaded", StringComparison.OrdinalIgnoreCase)) return;
+
+        _offloadReported = true;
+
+        int wanted = _startedGpuLayers > 0 ? _startedGpuLayers : Runtime.GpuLayers;
+        string device = _backend.Length > 0 ? _backend.Split('·')[0].Trim() : string.Empty;
+        bool usable = device.Length > 0 && !string.Equals(_backend, "CPU only", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(_backend, "Unknown", StringComparison.OrdinalIgnoreCase);
+
+        if (usable && wanted > 0)
         {
-            _offloadReported = true;
-            int wanted = Runtime.GpuLayers;
+            GpuSummary = wanted >= 99 ? $"all layers on {device}" : $"{wanted} layers on {device}";
 
-            GpuSummary = "CPU only";
+            // Said once, because this log format hides the offload and the number otherwise looks made up.
+            Emit("info", $"This llama.cpp build does not name the offload; {wanted} GPU layers were requested on {device}.");
+            return;
+        }
 
-            if (wanted > 0)
-            {
-                Emit("warn",
-                    "No GPU offload was reported, so the model is running on the CPU. " +
-                    "A build without CUDA/Vulkan/Metal support cannot use the card — the GPU layers setting " +
-                    "has no effect on it.");
-            }
+        GpuSummary = "CPU only";
+
+        if (wanted > 0)
+        {
+            Emit("warn",
+                "No GPU offload was reported, so the model is running on the CPU. " +
+                "A build without CUDA/Vulkan/Metal support cannot use the card — the GPU layers setting " +
+                "has no effect on it.");
         }
     }
 
@@ -1580,8 +1865,7 @@ public sealed class LlamaCppService
         if (_versions.TryGetValue(binary, out var known)) return known;
 
         string line = ProbeVersionLine(binary);
-        var semver = Semver(line);
-        string value = semver.HasValue ? Format(semver.Value) : line;
+        string value = AppVersion.TryParse(line, out var semver) ? $"v{semver}" : line;
         _versions[binary] = value;
 
         return value;
@@ -1617,25 +1901,6 @@ public sealed class LlamaCppService
             return "";
         }
     }
-
-    private static (int Major, int Minor, int Patch)? Semver(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        var match = Regex.Match(text, @"(\d+)\.(\d+)\.(\d+)");
-        if (!match.Success) return null;
-
-        return (int.Parse(match.Groups[1].Value), int.Parse(match.Groups[2].Value), int.Parse(match.Groups[3].Value));
-    }
-
-    private static int CompareSemver((int Major, int Minor, int Patch) left, (int Major, int Minor, int Patch) right)
-    {
-        if (left.Major != right.Major) return left.Major.CompareTo(right.Major);
-        if (left.Minor != right.Minor) return left.Minor.CompareTo(right.Minor);
-        return left.Patch.CompareTo(right.Patch);
-    }
-
-    private static string Format((int Major, int Minor, int Patch) version) => $"v{version.Major}.{version.Minor}.{version.Patch}";
 
     /// <summary>
     /// The build number worth comparing. `llama --version` prints "… (build 11370, commit …)"; a

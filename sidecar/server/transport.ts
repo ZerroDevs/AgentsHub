@@ -5,6 +5,7 @@
 
 import { Server, ServerWebSocket } from 'bun';
 import { InboundMessage, OutboundEvent } from '../types/protocol.ts';
+import { APP_VERSION } from '../appVersion.ts';
 
 export interface TransportOptions {
   port: number;
@@ -98,7 +99,7 @@ export class SidecarTransport {
               pid: process.pid,
               platform: process.platform as any,
               arch: process.arch,
-              version: '2.0.0',
+              version: APP_VERSION,
               timestamp: new Date().toISOString()
             });
           }

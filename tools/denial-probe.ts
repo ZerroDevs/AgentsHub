@@ -1,4 +1,4 @@
-import { parsePermissionDenial, commandRuleTarget } from '../src/session/sessionManager';
+import { parsePermissionDenial, commandRuleTarget } from '../sidecar/session/sessionManager';
 
 const cases: Array<[string, string]> = [
   [

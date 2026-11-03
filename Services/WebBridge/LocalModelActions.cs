@@ -16,10 +16,17 @@ public sealed partial class DashboardWebBridge
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource> _modelDownloads = new(StringComparer.OrdinalIgnoreCase);
 
-    private Task HandleLocalModelsListAsync(string? requestId)
+    private async Task HandleLocalModelsListAsync(string? requestId)
     {
         var library = LlamaModelLibrary.Instance;
         var budget = LocalHardware.Budget;
+
+        // Asked here so the shelf names the backend before a model is loaded. Cached for ten minutes
+        // by the service, and a missing binary answers instantly.
+        if (LlamaCppService.Instance.Status().Installed)
+        {
+            await LlamaCppService.Instance.BackendAsync().ConfigureAwait(false);
+        }
 
         SendResponse(requestId, true, new
         {
@@ -32,7 +39,6 @@ public sealed partial class DashboardWebBridge
             memory = new { vramMb = budget.VramMb, ramMb = budget.RamMb },
             models = DescribeLocalModels()
         });
-        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -409,11 +415,155 @@ public sealed partial class DashboardWebBridge
         });
     }
 
+    /// <summary>
+    /// Saves the launch flags for one model. They only reach the process at the next start, so a
+    /// running server for this file is stopped rather than left pretending to use them.
+    /// </summary>
+    private Task HandleLocalModelsSetFlagsAsync(JsonElement data, string? requestId)
+    {
+        string path = data.TryGetProperty("path", out var pEl) ? pEl.GetString() ?? "" : "";
+        if (!File.Exists(path))
+        {
+            SendResponse(requestId, false, "That model file is gone.");
+            return Task.CompletedTask;
+        }
+
+        var flags = new ModelFlags(
+            ContextSize: OptionalInt(data, "contextSize"),
+            GpuLayers: OptionalInt(data, "gpuLayers"),
+            CacheTypeK: OptionalText(data, "cacheTypeK"),
+            CacheTypeV: OptionalText(data, "cacheTypeV"),
+            FlashAttention: OptionalBool(data, "flashAttention"),
+            ExtraArgs: OptionalText(data, "extraArgs"),
+            Projector: OptionalText(data, "projector"));
+
+        LlamaModelLibrary.Instance.SetFlags(path, flags);
+
+        bool stopped = StopIfLoaded(path);
+
+        EmitLog("llama.cpp", "info", flags.IsEmpty
+            ? $"{Path.GetFileName(path)} uses the app-wide server flags again."
+            : $"Saved launch flags for {Path.GetFileName(path)}.");
+
+        SendResponse(requestId, true, new
+        {
+            success = true,
+            stopped,
+            message = stopped ? "Saved. The running model was unloaded so the new flags apply." : "Saved.",
+            models = DescribeLocalModels()
+        });
+
+        return Task.CompletedTask;
+    }
+
+    private Task HandleLocalModelsResetFlagsAsync(JsonElement data, string? requestId)
+    {
+        string path = data.TryGetProperty("path", out var pEl) ? pEl.GetString() ?? "" : "";
+
+        LlamaModelLibrary.Instance.ResetFlags(path);
+        bool stopped = StopIfLoaded(path);
+
+        SendResponse(requestId, true, new { success = true, stopped, models = DescribeLocalModels() });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Picks the mmproj a vision model needs, when it is not sitting beside the model already.</summary>
+    private Task HandleLocalModelsPickProjectorAsync(JsonElement data, string? requestId)
+    {
+        string path = data.TryGetProperty("path", out var pEl) ? pEl.GetString() ?? "" : "";
+        string? selected = null;
+
+#if WINDOWS
+        MaybePickOnUiThread(f =>
+        {
+            using var ofd = new OpenFileDialog
+            {
+                Title = "Pick the mmproj projector for this model",
+                Filter = "GGUF projector (mmproj*.gguf)|*.gguf|All files (*.*)|*.*",
+                CheckFileExists = true
+            };
+
+            if (ofd.ShowDialog(f) == DialogResult.OK) selected = ofd.FileName;
+        });
+#endif
+
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            SendResponse(requestId, true, new { chosen = false, models = DescribeLocalModels() });
+            return Task.CompletedTask;
+        }
+
+        var existing = LlamaModelLibrary.Instance.FlagsFor(path) ?? new ModelFlags();
+        LlamaModelLibrary.Instance.SetFlags(path, existing with { Projector = selected });
+        bool stopped = StopIfLoaded(path);
+
+        EmitLog("llama.cpp", "info", $"Projector for {Path.GetFileName(path)}: {selected}");
+
+        SendResponse(requestId, true, new { chosen = true, stopped, projector = selected, models = DescribeLocalModels() });
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Stops the server when it is serving this exact file, so new launch flags take effect.</summary>
+    private static bool StopIfLoaded(string path)
+    {
+        var service = LlamaCppService.Instance;
+        if (!string.Equals(service.LoadedModelPath, path, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!service.Status().Running) return false;
+
+        service.Stop();
+        return true;
+    }
+
     // ---- shared shapes ----
+
+    /// <summary>A number the page did not send stays null, so "unset" keeps meaning "use the default".</summary>
+    private static int? OptionalInt(JsonElement data, string name)
+    {
+        if (!data.TryGetProperty(name, out var el)) return null;
+        if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out int value)) return value;
+        if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out int parsed)) return parsed;
+
+        return null;
+    }
+
+    private static bool? OptionalBool(JsonElement data, string name)
+    {
+        if (!data.TryGetProperty(name, out var el)) return null;
+
+        return el.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => null
+        };
+    }
+
+    private static string? OptionalText(JsonElement data, string name)
+    {
+        if (!data.TryGetProperty(name, out var el) || el.ValueKind != JsonValueKind.String) return null;
+
+        string value = (el.GetString() ?? string.Empty).Trim();
+        return value.Length > 0 ? value : null;
+    }
 
     private static object DescribeModel(LocalModel model)
     {
-        var fit = LocalHardware.Budget.Fit(model.SizeBytes);
+        var budget = LocalHardware.Budget;
+        var service = LlamaCppService.Instance;
+        var flags = LlamaModelLibrary.Instance.FlagsFor(model.Path);
+        var metadata = LocalModelMetadataReader.For(model.Path);
+
+        // The context this model would actually be loaded with, and what that costs in cache: the
+        // badge used to count the weights alone, so a huge context looked free.
+        int context = Math.Max(flags?.ContextSize ?? service.Runtime.ContextSize, 8192);
+        string cacheK = flags?.CacheTypeK ?? service.Runtime.CacheTypeK;
+        double kvPerToken = metadata.KvBytesPerToken(cacheK);
+
+        // "Unknown" and an unprobed build are not evidence of a CPU-only binary, so they keep the
+        // normal verdict; only a confirmed CPU-only build drops the GPU claim.
+        bool gpuUsable = !string.Equals(service.Status().Backend, "CPU only", StringComparison.OrdinalIgnoreCase);
+
+        var fit = budget.Fit(model.SizeBytes, context, kvPerToken, gpuUsable);
 
         return new
         {
@@ -423,6 +573,21 @@ public sealed partial class DashboardWebBridge
             origin = model.Origin,
             managed = model.Managed,
             capabilities = model.Capabilities,
+            projector = model.ProjectorPath,
+            visionReady = model.VisionReady,
+            context,
+            kvMb = kvPerToken > 0 ? (long)(kvPerToken * context / 1048576.0) : 0,
+            suggestedContext = budget.SuggestContext(model.SizeBytes, kvPerToken, Math.Max(service.Runtime.ContextSize, 4096), gpuUsable),
+            flags = flags is null ? null : new
+            {
+                contextSize = flags.ContextSize,
+                gpuLayers = flags.GpuLayers,
+                cacheTypeK = flags.CacheTypeK,
+                cacheTypeV = flags.CacheTypeV,
+                flashAttention = flags.FlashAttention,
+                extraArgs = flags.ExtraArgs,
+                projector = flags.Projector
+            },
             fit = new { where = fit.Where, needMb = fit.NeedMb, haveMb = fit.HaveMb }
         };
     }

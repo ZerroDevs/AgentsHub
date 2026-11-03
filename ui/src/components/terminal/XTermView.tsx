@@ -79,7 +79,7 @@ export const XTermView: React.FC<XTermViewProps> = ({ cliId = 'antigravity_cli',
     window.addEventListener('resize', handleResize);
 
     // Initial Welcome message
-    term.writeln('\x1b[38;2;56;189;248mAgents Hub ConPTY Terminal HUD [v2.0]\x1b[0m');
+    term.writeln('\x1b[38;2;56;189;248mAgents Hub ConPTY Terminal HUD [v' + __APP_VERSION__ + ']\x1b[0m');
     term.writeln(`\x1b[90mSession bound to: ${cliId}\x1b[0m\r\n`);
 
     // Listen for incoming backend terminal stream

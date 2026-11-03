@@ -76,7 +76,9 @@ import { useProfileStore } from '../store/useProfileStore';
 import { profileLabel } from '../lib/profileName';
 import { webviewBridge } from '../services/webviewBridge';
 import { useSessionStore } from '../store/useSessionStore';
-import { useSidecarStore } from '../store/useSidecarStore';
+import { useSidecarStore, RAIL_VIEW_LABELS } from '../store/useSidecarStore';
+import { ActiveView } from '../types/agent';
+import { shortcutFromEvent, duplicateShortcutViews } from '../lib/railShortcuts';
 import { useGuideStore } from '../store/useGuideStore';
 import { LanSettings } from '../components/settings/LanSettings';
 import { TelemetryPanel } from '../components/settings/TelemetryPanel';
@@ -428,6 +430,7 @@ export const SettingsView: React.FC = () => {
     updateStatusText,
     updateStatusSubtext,
     updateInfo,
+    appVersion,
     downloadProgress,
     downloadProgressLabel,
     checkForUpdates,
@@ -487,6 +490,44 @@ export const SettingsView: React.FC = () => {
     };
   }, [noteInstallLine, finishInstall]);
 
+  /** Progress line of the GPU build download, or null when nothing is running. */
+  const [gpuInstall, setGpuInstall] = useState<string | null>(null);
+
+  // The llama.cpp card is the longest one on this page, and most of it is rarely touched. The
+  // header stays, so Serving/Stopped is still readable when it is folded away.
+  const [llamaOpen, setLlamaOpen] = useState(true);
+
+  // The switch downloads a build and swaps the server, which takes a minute; without its own line
+  // the Compute row just went quiet and the click looked ignored.
+  useEffect(() => {
+    const offGpu = webviewBridge.on('llama_gpu_progress', (payload: any) => {
+      if (!payload) return;
+
+      if (!payload.done) {
+        setGpuInstall(String(payload.line ?? 'Downloading the GPU build…'));
+        return;
+      }
+
+      setGpuInstall(null);
+      if (payload.status) setLlama(payload.status);
+      noteInstallLine('llamacpp', String(payload.line ?? ''));
+      void loadLlama();
+    });
+
+    return () => offGpu?.();
+  }, [noteInstallLine]);
+
+  const installGpuBuild = async () => {
+    setGpuInstall('Looking for the newest GPU build…');
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_install_gpu');
+      if (!res?.started) setGpuInstall(null);
+    } catch (err: any) {
+      setGpuInstall(null);
+      noteInstallLine('llamacpp', err?.message ?? 'The GPU build could not be started.');
+    }
+  };
+
   const {
     theme,
     accentColor,
@@ -528,6 +569,21 @@ export const SettingsView: React.FC = () => {
   // The section lives in the shared store so the guide can land directly on the dependency list.
   const activeCategory = useSidecarStore(state => state.settingsCategory);
   const setActiveCategory = useSidecarStore(state => state.setSettingsCategory);
+  const resetRailOrder = useSidecarStore(state => state.resetRailOrder);
+  const hiddenRailViews = useSidecarStore(state => state.hiddenRailViews);
+  const toggleRailViewHidden = useSidecarStore(state => state.toggleRailViewHidden);
+  const showAllRailViews = useSidecarStore(state => state.showAllRailViews);
+  const railShortcutsEnabled = useSidecarStore(state => state.railShortcutsEnabled);
+  const railShortcuts = useSidecarStore(state => state.railShortcuts);
+  const setRailShortcutsEnabled = useSidecarStore(state => state.setRailShortcutsEnabled);
+  const setRailShortcut = useSidecarStore(state => state.setRailShortcut);
+  const resetRailShortcuts = useSidecarStore(state => state.resetRailShortcuts);
+  /** The view whose key binding is being captured, if any. */
+  const [recordingShortcut, setRecordingShortcut] = useState<ActiveView | null>(null);
+  /** What the last binding did, e.g. that it took the key from another view. */
+  const [shortcutNote, setShortcutNote] = useState<string | null>(null);
+  /** Views whose key is also held by another view, shown as a badge instead of passing silently. */
+  const sharedShortcuts = duplicateShortcutViews(railShortcuts);
   const openGuide = useGuideStore(state => state.open);
   // Shows what the host actually stored, so a UI/host disagreement is visible instead of guessed.
   const [prefDebug, setPrefDebug] = useState<string | null>(null);
@@ -975,6 +1031,143 @@ export const SettingsView: React.FC = () => {
                   ) : null}
 
                   {wallpaperError ? <p className="text-[11px] text-state-danger">{wallpaperError}</p> : null}
+                </div>
+
+                {/* Navigation rail */}
+                <div className="space-y-3 pt-3 border-t border-[var(--border-subtle,#1E293B)]">
+                  <div>
+                    <label className="text-xs font-semibold text-[var(--text-muted,#94A3B8)]">Navigation rail:</label>
+                    <p className="text-[11px] text-[var(--text-dim,#64748B)] mt-0.5">
+                      Uncheck a view to take its icon off the rail; the view itself still works. Right-click an
+                      icon to move it, or focus one and press Alt+↑ / Alt+↓. Settings always stays.
+                    </p>
+                  </div>
+
+                  <div className="grid max-w-md grid-cols-2 gap-x-4 gap-y-1.5">
+                    {(Object.keys(RAIL_VIEW_LABELS) as ActiveView[])
+                      .filter(id => id !== 'settings')
+                      .map(id => (
+                        <label
+                          key={id}
+                          className="flex cursor-pointer items-center gap-2 text-xs text-[var(--text-main,#F1F5F9)]"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!hiddenRailViews.includes(id)}
+                            onChange={() => toggleRailViewHidden(id)}
+                            className="h-4 w-4 rounded accent-sky-500"
+                          />
+                          <span>{RAIL_VIEW_LABELS[id]}</span>
+                        </label>
+                      ))}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button variant="secondary" size="xs" onClick={resetRailOrder}>
+                      Reset order
+                    </Button>
+                    <Button variant="secondary" size="xs" onClick={showAllRailViews}>
+                      Show all views
+                    </Button>
+                  </div>
+
+                  {/* Keyboard shortcuts. Off by default: nothing listens until this box is ticked. */}
+                  <div className="space-y-2 border-t border-[var(--border-subtle,#1E293B)] pt-3">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs text-[var(--text-main,#F1F5F9)]">
+                      <input
+                        type="checkbox"
+                        checked={railShortcutsEnabled}
+                        onChange={event => setRailShortcutsEnabled(event.target.checked)}
+                        className="h-4 w-4 rounded accent-sky-500"
+                      />
+                      <span>Jump to a view with the keyboard</span>
+                    </label>
+                    <p className="text-[11px] text-[var(--text-dim,#64748B)]">
+                      Off by default. Click a key, press the combination you want, and it opens that view —
+                      including one hidden from the rail. Backspace clears a binding, Esc cancels.
+                    </p>
+
+                    <div
+                      className={`grid max-w-md grid-cols-2 gap-x-4 gap-y-1.5 ${
+                        railShortcutsEnabled ? '' : 'opacity-50'
+                      }`}
+                    >
+                      {(Object.keys(RAIL_VIEW_LABELS) as ActiveView[]).map(id => (
+                        <div key={id} className="flex items-center justify-between gap-2">
+                          <span className="text-xs text-[var(--text-main,#F1F5F9)]">
+                            {RAIL_VIEW_LABELS[id]}
+                            {sharedShortcuts.has(id) ? (
+                              <span
+                                title="Another view is bound to the same keys, so only one of them can fire"
+                                className="ml-1 rounded border border-amber-500/30 bg-amber-500/10 px-1 text-[9px] text-amber-400"
+                              >
+                                shared
+                              </span>
+                            ) : null}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={!railShortcutsEnabled}
+                            onClick={() => {
+                              setShortcutNote(null);
+                              setRecordingShortcut(recordingShortcut === id ? null : id);
+                            }}
+                            onKeyDown={event => {
+                              if (recordingShortcut !== id) return;
+
+                              // Kept from the app's own listener, or the first key of a new binding
+                              // would also switch the view being rebound.
+                              event.preventDefault();
+                              event.stopPropagation();
+
+                              if (event.key === 'Escape') {
+                                setRecordingShortcut(null);
+                                return;
+                              }
+
+                              if (event.key === 'Backspace' || event.key === 'Delete') {
+                                setRailShortcut(id, '');
+                                setRecordingShortcut(null);
+                                return;
+                              }
+
+                              const captured = shortcutFromEvent(event.nativeEvent);
+                              if (!captured) return;
+
+                              const previous = railShortcuts[id];
+                              const displaced = setRailShortcut(id, captured);
+
+                              // Saying what happened beats a key that silently stopped working for the
+                              // view that used to hold it.
+                              setShortcutNote(
+                                displaced
+                                  ? previous
+                                    ? `${captured} was ${RAIL_VIEW_LABELS[displaced]}'s, so the two were swapped.`
+                                    : `${captured} was ${RAIL_VIEW_LABELS[displaced]}'s, so ${RAIL_VIEW_LABELS[displaced]} is now unset.`
+                                  : null
+                              );
+                              setRecordingShortcut(null);
+                            }}
+                            onBlur={() => setRecordingShortcut(current => (current === id ? null : current))}
+                            className={`min-w-[74px] rounded border px-2 py-1 font-mono text-[11px] transition-colors disabled:cursor-not-allowed ${
+                              recordingShortcut === id
+                                ? 'border-sky-500 bg-sky-500/10 text-accent'
+                                : 'border-[var(--border-subtle,#1E293B)] bg-[var(--bg-input,#0D1322)] text-[var(--text-muted,#94A3B8)] hover:border-slate-600'
+                            }`}
+                            aria-label={`Shortcut for ${RAIL_VIEW_LABELS[id]}`}
+                          >
+                            {recordingShortcut === id ? 'Press keys…' : railShortcuts[id] || 'Not set'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    {shortcutNote ? <p className="text-[11px] text-amber-400">{shortcutNote}</p> : null}
+
+                    <Button variant="secondary" size="xs" onClick={resetRailShortcuts}>
+                      Reset shortcuts
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1590,20 +1783,37 @@ export const SettingsView: React.FC = () => {
                       </p>
                     </div>
 
-                    <span
-                      className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
-                        llama?.running
-                          ? 'bg-emerald-500/10 text-state-success border-emerald-500/20'
-                          : llama?.installed
-                            ? 'bg-slate-500/10 text-content-dim border-slate-500/20'
-                            : 'bg-rose-500/10 text-state-danger border-rose-500/20'
-                      }`}
-                    >
-                      {llama?.running ? 'Serving' : llama?.installed ? 'Stopped' : 'Not installed'}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
+                          llama?.running
+                            ? 'bg-emerald-500/10 text-state-success border-emerald-500/20'
+                            : llama?.installed
+                              ? 'bg-slate-500/10 text-content-dim border-slate-500/20'
+                              : 'bg-rose-500/10 text-state-danger border-rose-500/20'
+                        }`}
+                      >
+                        {llama?.running ? 'Serving' : llama?.installed ? 'Stopped' : 'Not installed'}
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => setLlamaOpen(open => !open)}
+                        aria-expanded={llamaOpen}
+                        aria-label={llamaOpen ? 'Collapse llama.cpp settings' : 'Expand llama.cpp settings'}
+                        title={llamaOpen ? 'Collapse these settings' : 'Show these settings'}
+                        className="flex h-6 w-6 items-center justify-center rounded border border-surface-border text-content-dim transition-colors hover:text-content-main"
+                      >
+                        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${llamaOpen ? '' : '-rotate-90'}`} />
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="p-3 rounded-lg bg-[var(--bg-input,#0D1322)] border border-[var(--border-subtle,#1E293B)] space-y-2">
+                  <div
+                    className={`p-3 rounded-lg bg-[var(--bg-input,#0D1322)] border border-[var(--border-subtle,#1E293B)] space-y-2 ${
+                      llamaOpen ? '' : 'hidden'
+                    }`}
+                  >
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[10px] uppercase tracking-wide text-content-dim">Server</span>
                       <span
@@ -1612,7 +1822,11 @@ export const SettingsView: React.FC = () => {
                       >
                         {llama?.path || 'Not found'}
                       </span>
-                      {llama?.usesCustomPath ? (
+                      {llama?.gpuBuild ? (
+                        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[9.5px] font-mono text-state-success">
+                          GPU build
+                        </span>
+                      ) : llama?.usesCustomPath ? (
                         <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 text-[9.5px] font-mono text-accent">
                           your file
                         </span>
@@ -1665,12 +1879,41 @@ export const SettingsView: React.FC = () => {
                       >
                         {llama?.gpu || (llama?.running ? 'loading…' : 'not loaded')}
                       </span>
-                      {llama?.running && llama?.gpu === 'CPU only' && (llama?.runtime?.gpuLayers ?? 0) > 0 ? (
-                        <span className="text-[10px] text-state-warning">
-                          This build has no GPU support, so GPU layers cannot help. Use a CUDA/Vulkan build.
-                        </span>
+                      {llama?.backend === 'CPU only' || (llama?.running && llama?.gpu === 'CPU only') ? (
+                        <>
+                          <span className="text-[10px] text-state-warning">
+                            This build has no GPU support, so GPU layers cannot help.
+                          </span>
+                          <Button
+                            variant="primary"
+                            size="xs"
+                            disabled={gpuInstall !== null || llamaBusy}
+                            leftIcon={
+                              gpuInstall ? (
+                                <RefreshCw className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Download className="h-3 w-3" />
+                              )
+                            }
+                            onClick={() => void installGpuBuild()}
+                            title="Downloads the official CUDA build (Vulkan when CUDA is not available) from GitHub into the app's own folder, checks that it sees the card, and switches the server to it. Nothing you placed by hand is overwritten."
+                          >
+                            {gpuInstall ? 'Installing…' : 'Switch to GPU build'}
+                          </Button>
+                        </>
                       ) : null}
                     </div>
+
+                    {gpuInstall ? (
+                      <p className="text-[10px] font-mono text-state-warning break-all">{gpuInstall}</p>
+                    ) : null}
+
+                    {llama?.backend === 'CPU only' || (llama?.running && llama?.gpu === 'CPU only') ? (
+                      <p className="text-[10px] text-content-dim">
+                        A GPU build puts the layers on the card: CUDA with its runtime is about 650 MB, Vulkan about
+                        40 MB when CUDA is unavailable. Nothing you placed by hand is overwritten.
+                      </p>
+                    ) : null}
 
                     {/* Who runs the turn. Direct is the default because it streams into this chat
                         without a CLI or the translating bridge in the middle. */}
@@ -2918,7 +3161,7 @@ export const SettingsView: React.FC = () => {
                         ABOUT AGENTS HUB
                       </h3>
                       <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-sky-500/10 text-accent border border-sky-500/20">
-                        v{updateInfo?.currentVersion || '1.0.5'}
+                        v{updateInfo?.currentVersion || appVersion || '—'}
                       </span>
                     </div>
                     <p className="text-xs text-[var(--text-dim,#64748B)] font-mono mt-0.5 truncate">
@@ -2954,7 +3197,8 @@ export const SettingsView: React.FC = () => {
                           {updateStatusText || 'Check for updates'}
                         </div>
                         <div className="text-[11px] text-[var(--text-dim,#64748B)] mt-0.5">
-                          {updateStatusSubtext || 'Target: github.com/ZerroDevs/AgentsHub'}
+                          {updateStatusSubtext
+                            || (appVersion ? `Current: v${appVersion}` : 'Target: github.com/ZerroDevs/AgentsHub')}
                         </div>
                       </div>
                     </div>

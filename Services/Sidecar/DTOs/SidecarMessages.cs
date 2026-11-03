@@ -491,7 +491,7 @@ public class SidecarStatusEvent : BaseSidecarEvent
     public int UptimeSec { get; set; }
 
     [JsonPropertyName("version")]
-    public string Version { get; set; } = "2.0.0";
+    public string Version { get; set; } = AgentsHub.Helpers.AppInfo.Version;
 }
 
 public class AgentStateEvent : BaseSidecarEvent

@@ -16,6 +16,6 @@
     "noEmit": true,
     "rootDir": "./"
   },
-  "include": ["src/**/*", "build.ts"],
+  "include": ["sidecar/**/*", "build.ts"],
   "exclude": ["node_modules", "dist", "bin", "obj"]
 }

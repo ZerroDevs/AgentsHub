@@ -581,6 +581,7 @@ public sealed class ZaiEngine : IDisposable
         IProgress<ZaiToolStep>? tools = null,
         Action<string>? onChatId = null,
         bool toolsAllowed = true,
+        IReadOnlyList<string>? attachmentFiles = null,
         CancellationToken ct = default)
     {
         await _turnLock.WaitAsync(ct).ConfigureAwait(false);
@@ -592,7 +593,7 @@ public sealed class ZaiEngine : IDisposable
 
             try
             {
-                return await SendLockedAsync(prompt, chatId, root, progress, tools, onChatId, toolsAllowed, turn.Token)
+                return await SendLockedAsync(prompt, chatId, root, progress, tools, onChatId, toolsAllowed, attachmentFiles, turn.Token)
                     .ConfigureAwait(false);
             }
             finally
@@ -614,6 +615,7 @@ public sealed class ZaiEngine : IDisposable
         IProgress<ZaiToolStep>? tools,
         Action<string>? onChatId,
         bool toolsAllowed,
+        IReadOnlyList<string>? attachmentFiles,
         CancellationToken ct)
     {
         string? chat = chatId;
@@ -636,6 +638,9 @@ public sealed class ZaiEngine : IDisposable
             if (chat is not null) _primedChats.Add(chat);
             Log($"primed chat={chat} skills={SkillCatalog.Discover(root!).Count} mcpTools={McpTools.Count}");
         }
+
+        // The files belong to the prompt, not to the guide that primed the chat.
+        await AttachAllAsync(attachmentFiles, ct).ConfigureAwait(false);
 
         string message = prompt;
 
@@ -719,6 +724,115 @@ public sealed class ZaiEngine : IDisposable
     /// Sends one message and reads one answer, reporting the chat id the page moved to as soon as it
     /// exists rather than at the end of a long tool loop.
     /// </summary>
+    /// <summary>
+    /// Puts this turn's files on the Z.ai page's upload control, or fails by name.
+    ///
+    /// The composer is text-only; an image or a PDF has to go through the page's own input, which
+    /// CDP can set. Sending the turn without the file is the one outcome worth refusing.
+    /// </summary>
+    /// <summary>
+    /// Reports whether this page exposes an upload control, and how it was found.
+    ///
+    /// Attaching guesses at a bare `input[type=file]` and, failing that, clicks something that looks
+    /// like a paperclip. That markup belongs to the page, not to this app, so when an upload fails
+    /// this sentence is the difference between a diagnosis and a shrug.
+    /// </summary>
+    public Task<string> ProbeUploadAsync() => UiAsync(async () =>
+    {
+        var core = _web?.CoreWebView2;
+        if (core == null) return "The Z.ai window is not open yet, so there is nothing to check.";
+
+        if (await FindFileInputAsync(core).ConfigureAwait(true) > 0)
+        {
+            return "Found an input[type=file] on the page. Attachments should upload normally.";
+        }
+
+        try
+        {
+            await core.ExecuteScriptAsync(
+                "document.querySelector('[aria-label*=\"ttach\"], [aria-label*=\"pload\"], [data-testid*=\"upload\"]')?.click()").ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            return "No file input, and the attach button could not be clicked.";
+        }
+
+        await Task.Delay(600).ConfigureAwait(true);
+
+        return await FindFileInputAsync(core).ConfigureAwait(true) > 0
+            ? "The input appears once the attach button is clicked; that is what the upload does. Attachments work."
+            : "No file input, even after clicking the attach button. Uploads will fail on this page.";
+    });
+
+    private async Task AttachAllAsync(IReadOnlyList<string>? files, CancellationToken ct)
+    {
+        if (files is null || files.Count == 0) return;
+
+        foreach (string file in files)
+        {
+            bool attached = await UiAsync(() => AttachFileAsync(file)).ConfigureAwait(false);
+
+            if (!attached)
+            {
+                throw new InvalidOperationException(
+                    $"Z.ai would not take {Path.GetFileName(file)}: the page has no file input. " +
+                    "Remove the attachment, or use an engine that accepts files such as Claude Code or OpenCode.");
+            }
+        }
+
+        // The upload runs in the background; a message typed over it is sent without the file.
+        await Task.Delay(1500, ct).ConfigureAwait(false);
+    }
+
+    private async Task<bool> AttachFileAsync(string path)
+    {
+        var core = _web?.CoreWebView2;
+        if (core == null) return false;
+
+        int nodeId = await FindFileInputAsync(core).ConfigureAwait(false);
+
+        if (nodeId == 0)
+        {
+            try
+            {
+                await core.ExecuteScriptAsync(
+                    "document.querySelector('[aria-label*=\"ttach\"], [aria-label*=\"pload\"], [data-testid*=\"upload\"]')?.click()");
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException)
+            {
+                // A refused click leaves nothing to attach to.
+            }
+
+            await Task.Delay(400).ConfigureAwait(false);
+            nodeId = await FindFileInputAsync(core).ConfigureAwait(false);
+        }
+
+        if (nodeId == 0) return false;
+
+        await core.CallDevToolsProtocolMethodAsync(
+            "DOM.setFileInputFiles",
+            JsonSerializer.Serialize(new { files = new[] { path }, nodeId })).ConfigureAwait(false);
+
+        Log($"attached {Path.GetFileName(path)}");
+        return true;
+    }
+
+    private static async Task<int> FindFileInputAsync(CoreWebView2 core)
+    {
+        string docRaw = await core.CallDevToolsProtocolMethodAsync("DOM.getDocument", "{\"depth\":-1}").ConfigureAwait(false);
+
+        using var doc = JsonDocument.Parse(docRaw);
+        int rootId = doc.RootElement.GetProperty("root").GetProperty("nodeId").GetInt32();
+
+        string queryRaw = await core.CallDevToolsProtocolMethodAsync(
+            "DOM.querySelector",
+            JsonSerializer.Serialize(new { nodeId = rootId, selector = "input[type=file]" })).ConfigureAwait(false);
+
+        using var query = JsonDocument.Parse(queryRaw);
+
+        return query.RootElement.TryGetProperty("nodeId", out var id) ? id.GetInt32() : 0;
+    }
+
     private async Task<ZaiReply> SendOnceAsync(
         string prompt,
         string? chatId,

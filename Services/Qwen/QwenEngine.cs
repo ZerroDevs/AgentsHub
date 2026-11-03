@@ -529,10 +529,11 @@ public sealed class QwenEngine : IDisposable
         IProgress<string>? thinking = null,
         string? conversationId = null,
         Action<string>? onChatId = null,
+        IReadOnlyList<string>? attachmentFiles = null,
         CancellationToken ct = default)
     {
         await _turnLock.WaitAsync(ct).ConfigureAwait(false);
-        Log($"turn start, {prompt.Length} chars, tools={toolsEnabled}");
+        Log($"turn start, {prompt.Length} chars, tools={toolsEnabled}, files={attachmentFiles?.Count ?? 0}");
 
         _lastTurnAt = DateTime.UtcNow;
 
@@ -547,13 +548,16 @@ public sealed class QwenEngine : IDisposable
 
             if (!toolsEnabled || string.IsNullOrWhiteSpace(root))
             {
+                // The files go on the page before the text, or the message is sent without them.
+                await AttachAllAsync(attachmentFiles, ct).ConfigureAwait(false);
+
                 var plain = await SendOnceAsync(prompt, progress, thinking, ct).ConfigureAwait(false);
                 _lastError = null;
                 await ReportChatIdAsync(onChatId).ConfigureAwait(false);
                 return plain;
             }
 
-            var reply = await RunWithToolsAsync(prompt, root!, skipPermissions, progress, thinking, ct)
+            var reply = await RunWithToolsAsync(prompt, root!, skipPermissions, progress, thinking, attachmentFiles, ct)
                 .ConfigureAwait(false);
 
             _lastError = null;
@@ -585,6 +589,7 @@ public sealed class QwenEngine : IDisposable
         bool skipPermissions,
         IProgress<string>? progress,
         IProgress<string>? thinking,
+        IReadOnlyList<string>? attachmentFiles,
         CancellationToken ct)
     {
         // Priming is per conversation, not per process. The guide names a working directory, and it
@@ -624,6 +629,9 @@ public sealed class QwenEngine : IDisposable
             _primedChat = await CurrentPagePathAsync().ConfigureAwait(false);
             Log($"primed in {_primedChat}");
         }
+
+        // After priming and before the prompt: the guide is not the message the files belong to.
+        await AttachAllAsync(attachmentFiles, ct).ConfigureAwait(false);
 
         // The guide is the oldest message in the chat, and a provider that compacts a long conversation
         // can summarise it away. One short line at the end of the prompt keeps the format where it is
@@ -811,6 +819,117 @@ public sealed class QwenEngine : IDisposable
     }
 
     /// <summary>One exchange: type, send, read. No tool handling.</summary>
+    /// <summary>
+    /// Puts this turn's files on the page's upload control.
+    ///
+    /// A chat box carries text only, so an image or a PDF reaches Qwen through the page's own input.
+    /// CDP sets that input from outside; a page that exposes none is reported by name rather than
+    /// sending the turn as if the attachment had never been added.
+    /// </summary>
+    /// <summary>
+    /// Reports whether this page exposes an upload control, and how it was found.
+    ///
+    /// Attaching guesses at a bare `input[type=file]` and, failing that, clicks something that looks
+    /// like a paperclip. That markup belongs to the page, not to this app, so when an upload fails
+    /// this sentence is the difference between a diagnosis and a shrug.
+    /// </summary>
+    public Task<string> ProbeUploadAsync() => UiAsync(async () =>
+    {
+        var core = _web?.CoreWebView2;
+        if (core == null) return "The Qwen window is not open yet, so there is nothing to check.";
+
+        if (await FindFileInputAsync(core).ConfigureAwait(true) > 0)
+        {
+            return "Found an input[type=file] on the page. Attachments should upload normally.";
+        }
+
+        try
+        {
+            await core.ExecuteScriptAsync(
+                "document.querySelector('[aria-label*=\"ttach\"], [aria-label*=\"pload\"], [data-testid*=\"upload\"]')?.click()").ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            return "No file input, and the attach button could not be clicked.";
+        }
+
+        await Task.Delay(600).ConfigureAwait(true);
+
+        return await FindFileInputAsync(core).ConfigureAwait(true) > 0
+            ? "The input appears once the attach button is clicked; that is what the upload does. Attachments work."
+            : "No file input, even after clicking the attach button. Uploads will fail on this page.";
+    });
+
+    private async Task AttachAllAsync(IReadOnlyList<string>? files, CancellationToken ct)
+    {
+        if (files is null || files.Count == 0) return;
+
+        foreach (string file in files)
+        {
+            bool attached = await UiAsync(() => AttachFileAsync(file)).ConfigureAwait(false);
+
+            if (!attached)
+            {
+                throw new InvalidOperationException(
+                    $"Qwen would not take {Path.GetFileName(file)}: the page has no file input. " +
+                    "Remove the attachment, or use an engine that accepts files such as Claude Code or OpenCode.");
+            }
+        }
+
+        // The page uploads in the background; a message sent mid-upload arrives without the file.
+        await Task.Delay(1500, ct).ConfigureAwait(false);
+    }
+
+    private async Task<bool> AttachFileAsync(string path)
+    {
+        var core = _web?.CoreWebView2;
+        if (core == null) return false;
+
+        int nodeId = await FindFileInputAsync(core).ConfigureAwait(false);
+
+        if (nodeId == 0)
+        {
+            // Some builds create the input only once the paperclip has been used.
+            try
+            {
+                await core.ExecuteScriptAsync(
+                    "document.querySelector('[aria-label*=\"ttach\"], [aria-label*=\"pload\"], [data-testid*=\"upload\"]')?.click()");
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException)
+            {
+                // A page that refuses the click is the same as a page with no control.
+            }
+
+            await Task.Delay(400).ConfigureAwait(false);
+            nodeId = await FindFileInputAsync(core).ConfigureAwait(false);
+        }
+
+        if (nodeId == 0) return false;
+
+        await core.CallDevToolsProtocolMethodAsync(
+            "DOM.setFileInputFiles",
+            JsonSerializer.Serialize(new { files = new[] { path }, nodeId })).ConfigureAwait(false);
+
+        Log($"attached {Path.GetFileName(path)}");
+        return true;
+    }
+
+    private static async Task<int> FindFileInputAsync(CoreWebView2 core)
+    {
+        string docRaw = await core.CallDevToolsProtocolMethodAsync("DOM.getDocument", "{\"depth\":-1}").ConfigureAwait(false);
+
+        using var doc = JsonDocument.Parse(docRaw);
+        int rootId = doc.RootElement.GetProperty("root").GetProperty("nodeId").GetInt32();
+
+        string queryRaw = await core.CallDevToolsProtocolMethodAsync(
+            "DOM.querySelector",
+            JsonSerializer.Serialize(new { nodeId = rootId, selector = "input[type=file]" })).ConfigureAwait(false);
+
+        using var query = JsonDocument.Parse(queryRaw);
+
+        return query.RootElement.TryGetProperty("nodeId", out var id) ? id.GetInt32() : 0;
+    }
+
     private async Task<QwenReply> SendOnceAsync(
         string prompt,
         IProgress<string>? progress,

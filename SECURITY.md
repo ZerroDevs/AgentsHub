@@ -10,8 +10,8 @@ Security patches and vulnerability updates are provided for the current active r
 
 | Version | Supported | Status |
 | :--- | :--- | :--- |
-| **2.0.x** | Yes | Current active release line. |
-| **< 2.0.0** | No | Legacy preview releases. Please upgrade to the latest release. |
+| **0.0.120** | Yes | Current active release line. |
+| **< 0.0.120** | No | Older releases. Please upgrade to the latest release. |
 
 ---
 

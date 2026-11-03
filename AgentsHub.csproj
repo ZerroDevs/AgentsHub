@@ -20,9 +20,19 @@
     <AssemblyTitle>Agents Hub</AssemblyTitle>
     <AssemblyDescription>Agents Hub - Multi-Agent Desktop Hub and CLI Workspace</AssemblyDescription>
     <Product>Agents Hub</Product>
-    <AssemblyVersion>2.0.0.0</AssemblyVersion>
-    <FileVersion>2.0.0.0</FileVersion>
-    <Version>2.0.0</Version>
+    <!--
+      VERSION at the repo root is the only place the number is written down. This project file, the
+      UI bundle (ui/vite.config.ts), the sidecar (sidecar/appVersion.ts), the installer (which receives
+      MyAppVersion) and the update check all read it, so a release is one edit.
+      Three numbers, a leading "v" is tolerated: 0.0.121 or v0.0.121.
+    -->
+    <AppVersionFile>$(MSBuildProjectDirectory)/VERSION</AppVersionFile>
+    <AppVersion Condition="Exists('$(AppVersionFile)')">$([System.IO.File]::ReadAllText('$(AppVersionFile)').Trim())</AppVersion>
+    <AppVersion Condition="'$(AppVersion)' == ''">0.0.0</AppVersion>
+    <AppVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(AppVersion)', '^[vV]\s*', ''))</AppVersion>
+    <AssemblyVersion>$(AppVersion).0</AssemblyVersion>
+    <FileVersion>$(AppVersion).0</FileVersion>
+    <Version>$(AppVersion)</Version>
     <NoWarn>$(NoWarn);MSB3277;CA1416</NoWarn>
   </PropertyGroup>
 
@@ -152,6 +162,19 @@
     </Content>
   </ItemGroup>
 
+
+  <!--
+    Mirror VERSION into the files that cannot read it (package.json, lockfile, README and SECURITY
+    version lines). node is already required to build the UI, so this costs nothing where the app
+    is built for real; on a machine without it the script's own error is shown and the build goes
+    on, since none of those files affect the binary.
+  -->
+  <Target Name="SyncVersionFiles" BeforeTargets="BeforeBuild"
+          Condition="Exists('$(MSBuildProjectDirectory)/tools/sync-version.mjs') and '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/tools/sync-version.mjs&quot;"
+          IgnoreExitCode="true"
+          StandardOutputImportance="normal" />
+  </Target>
 
   <!-- Terminate any running instance before build to prevent MSB3021 file lock -->
   <Target Name="CloseRunningInstance" BeforeTargets="BeforeBuild" Condition="'$(OS)' == 'Windows_NT'">

@@ -167,7 +167,8 @@ public sealed partial class DashboardWebBridge : IDisposable
             releaseNotes = updateInfo.ReleaseNotes,
             downloadUrl = updateInfo.DownloadUrl,
             assetSizeBytes = updateInfo.AssetSizeBytes,
-            publishedAtUtc = updateInfo.PublishedAtUtc
+            publishedAtUtc = updateInfo.PublishedAtUtc,
+            message = updateInfo.Message
         });
     }
 
@@ -690,6 +691,13 @@ public sealed partial class DashboardWebBridge : IDisposable
         var llama = isLocal ? Services.LlamaCpp.LlamaCppService.Instance : null;
         var status = llama?.Status();
 
+        // A vision model loaded without its projector cannot read an image. The composer needs that
+        // before the paperclip is used, not after the turn is refused.
+        string loadedModel = status is { Running: true } ? status.LoadedModel : string.Empty;
+        string projector = string.IsNullOrWhiteSpace(loadedModel)
+            ? string.Empty
+            : Services.LlamaCpp.LlamaModelLibrary.Instance.ProjectorFor(loadedModel);
+
         // A local server's ids are file paths or repository names, so the picker lists the shelf and
         // sends the matching names alongside: the id stays what llama.cpp answers to, the label is
         // what someone wrote in Local models.
@@ -715,7 +723,9 @@ public sealed partial class DashboardWebBridge : IDisposable
                 tokensPerSecond = llama!.TokensPerSecond,
                 averageTokensPerSecond = llama.AverageTokensPerSecond,
                 generatedTokens = llama.GeneratedTokens,
-                gpu = status.Gpu
+                gpu = status.Gpu,
+                visionReady = projector.Length > 0,
+                projector = projector.Length > 0 ? Path.GetFileName(projector) : string.Empty
             }
         });
 
@@ -1818,13 +1828,44 @@ public sealed partial class DashboardWebBridge : IDisposable
     /// <summary>
     /// Installs a dependency in the background, streaming installer output as
     /// dependency_install_progress events and finishing with dependency_install_complete.
+    ///
+    /// <paramref name="preferGpuBuild"/> is off for an update, which replaces the vendor's own copy;
+    /// a fresh install takes the GPU build, because a CPU one wastes the card sitting in the machine.
     /// </summary>
-    private async Task RunDependencyInstallAsync(DependencyDefinition definition)
+    private async Task RunDependencyInstallAsync(DependencyDefinition definition, bool preferGpuBuild = true)
     {
         var startedAt = DateTime.UtcNow;
 
         try
         {
+            if (preferGpuBuild
+                && string.Equals(definition.Id, "llamacpp", StringComparison.OrdinalIgnoreCase)
+                && Services.LlamaCpp.LlamaGpuBuild.Supported)
+            {
+                var service = Services.LlamaCpp.LlamaCppService.Instance;
+
+                PostEventToUi("dependency_install_progress", new
+                {
+                    id = definition.Id,
+                    line = $"Installing the official {Services.LlamaCpp.LlamaGpuBuild.BackendName} build of llama.cpp."
+                });
+
+                var gpu = await service.InstallGpuBuildAsync(line =>
+                    PostEventToUi("dependency_install_progress", new { id = definition.Id, line })).ConfigureAwait(false);
+
+                if (gpu.Ok)
+                {
+                    PostDependencyInstallComplete(definition.Id, true, gpu.Message, DependencyCheckerService.GetStatus(definition.Id));
+                    return;
+                }
+
+                PostEventToUi("dependency_install_progress", new
+                {
+                    id = definition.Id,
+                    line = "The GPU build could not be installed, so the vendor installer runs instead."
+                });
+            }
+
             if (string.Equals(definition.InstallKind, "browser", StringComparison.OrdinalIgnoreCase))
             {
                 if (string.IsNullOrWhiteSpace(definition.SiteUrl))
@@ -2135,7 +2176,7 @@ public sealed partial class DashboardWebBridge : IDisposable
         // and comes back only if it was up.
         if (before.Running) service.Stop();
 
-        await RunDependencyInstallAsync(definition).ConfigureAwait(false);
+        await RunDependencyInstallAsync(definition, preferGpuBuild: false).ConfigureAwait(false);
 
         bool switched = false;
 
@@ -2175,6 +2216,62 @@ public sealed partial class DashboardWebBridge : IDisposable
             status = ToLlamaCppDto(after)
         });
     }
+
+    /// <summary>
+    /// Switches a CPU-only llama.cpp to the official GPU build.
+    ///
+    /// Acknowledged at once: the download is tens of megabytes and streams progress as
+    /// `llama_gpu_progress` events, so the click is never left waiting on a request timeout.
+    /// </summary>
+    private void HandleLlamaCppInstallGpu(string? requestId)
+    {
+        if (!Services.LlamaCpp.LlamaGpuBuild.Supported)
+        {
+            SendResponse(requestId, false,
+                $"llama.cpp publishes no {Services.LlamaCpp.LlamaGpuBuild.BackendName} build for this platform.");
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _gpuInstallRunning, 1, 0) == 1)
+        {
+            SendResponse(requestId, false, "A GPU build is already downloading.");
+            return;
+        }
+
+        SendResponse(requestId, true, new { started = true, backend = Services.LlamaCpp.LlamaGpuBuild.BackendName });
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var service = Services.LlamaCpp.LlamaCppService.Instance;
+
+                var result = await service.InstallGpuBuildAsync(line =>
+                    PostEventToUi("llama_gpu_progress", new { line, done = false })).ConfigureAwait(false);
+
+                PostEventToUi("llama_gpu_progress", new
+                {
+                    line = result.Message,
+                    done = true,
+                    success = result.Ok,
+                    backend = result.Backend,
+                    path = result.Path,
+                    status = ToLlamaCppDto(service.Status())
+                });
+            }
+            catch (Exception ex)
+            {
+                PostEventToUi("llama_gpu_progress", new { line = ex.Message, done = true, success = false });
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _gpuInstallRunning, 0);
+            }
+        });
+    }
+
+    /// <summary>One GPU download at a time: two would race for the same folder.</summary>
+    private static int _gpuInstallRunning;
 
     /// <summary>
     /// Whether this binary belongs to the llama.app installer, the only channel that can replace it
@@ -2295,11 +2392,14 @@ public sealed partial class DashboardWebBridge : IDisposable
         endpoint = status.Endpoint,
         message = status.Message,
         usesCustomPath = status.UsesCustomPath,
+        // A build this app downloaded is a custom path too, but calling it "your file" would be wrong.
+        gpuBuild = status.Path.StartsWith(Services.LlamaCpp.LlamaGpuBuild.InstallDirectory, StringComparison.OrdinalIgnoreCase),
         loadedModel = status.LoadedModel,
         runOnRequest = status.RunOnRequest,
         allowMultiple = status.AllowMultiple,
         runner = status.Runner,
         gpu = status.Gpu,
+        backend = status.Backend,
         runtime = new
         {
             contextSize = status.Runtime.ContextSize,

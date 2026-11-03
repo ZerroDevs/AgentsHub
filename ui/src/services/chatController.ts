@@ -90,10 +90,10 @@ async function dispatch({ sessionId, prompt, attachments }: DispatchTarget): Pro
       toolsEnabled: context.toolsEnabled,
       deepThink: context.deepThink,
       webSearch: context.webSearch,
-      // The host writes these to temp files and hands them to the engine as real files.
-      attachments: attachments
-        ?.filter(a => Boolean(a.dataUrl))
-        .map(a => ({ name: a.name, type: a.type, dataUrl: a.dataUrl })),
+      // The page already wrote these to disk in slices, so only paths cross the bridge here.
+      attachmentPaths: attachments
+        ?.filter(a => Boolean(a.path))
+        .map(a => ({ name: a.name, type: a.type, path: a.path })),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Failed to dispatch chat prompt';

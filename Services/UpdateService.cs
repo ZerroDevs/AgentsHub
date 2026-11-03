@@ -36,13 +36,30 @@ public sealed class UpdateInfo
     public string AssetSha256 { get; set; } = string.Empty;
     public long AssetSizeBytes { get; set; }
     public DateTime? PublishedAtUtc { get; set; }
+
+    /// <summary>
+    /// True when this build is a higher version than every published release. Worth saying out
+    /// loud: a build reporting `2.0.0` while the releases walk `0.0.101` is not "up to date" in any
+    /// useful sense, it is on a newer number than the release line and will never be offered one.
+    /// </summary>
+    public bool InstalledIsAhead { get; set; }
+
+    /// <summary>Why the check answered what it did, for a log line the person can act on.</summary>
+    public string Message { get; set; } = string.Empty;
 }
 
 public sealed class UpdateService
 {
     public static UpdateService Instance { get; } = new();
 
-    private const string LatestReleaseApiUrl = "https://api.github.com/repos/ZerroDevs/AgentsHub/releases/latest";
+    /// <summary>
+    /// The release list, not the "latest" pointer.
+    ///
+    /// GitHub calls a release latest by publication time, which is not the same as the highest version:
+    /// a v1.0.0 published after v1.0.103 would win the pointer while being older. Reading the list and
+    /// comparing tags is the only way `0.0.100`…`0.0.102` and `v1.0.0`…`v1.0.103` both behave.
+    /// </summary>
+    private const string ReleasesApiUrl = "https://api.github.com/repos/ZerroDevs/AgentsHub/releases?per_page=30";
     private static readonly SemaphoreSlim _downloadLock = new(1, 1);
 
     // Only the project's own HTTPS release assets are installable. The renderer supplies the URL,
@@ -82,94 +99,183 @@ public sealed class UpdateService
 
         try
         {
-            using var response = await _httpClient.GetAsync(LatestReleaseApiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            using var response = await _httpClient.GetAsync(ReleasesApiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+
             if (!response.IsSuccessStatusCode)
             {
                 info.Result = response.StatusCode == System.Net.HttpStatusCode.NotFound
                     ? UpdateCheckResult.NoReleasesFound
                     : UpdateCheckResult.CheckFailed;
+                info.Message = $"GitHub answered {(int)response.StatusCode}.";
                 return info;
             }
 
-            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-            var root = doc.RootElement;
+            string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-            var tagName = root.TryGetProperty("tag_name", out var tagProp) ? tagProp.GetString() ?? string.Empty : string.Empty;
-            info.LatestVersion = tagName.Trim().TrimStart('v', 'V');
-            info.ReleaseName = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? tagName : tagName;
-            info.ReleaseNotes = root.TryGetProperty("body", out var bodyProp) ? bodyProp.GetString() ?? string.Empty : string.Empty;
-
-            if (root.TryGetProperty("published_at", out var pubProp) && pubProp.TryGetDateTime(out var pubDate))
+            if (!ReadNewestRelease(body, info))
             {
-                info.PublishedAtUtc = pubDate.ToUniversalTime();
+                info.Result = UpdateCheckResult.NoReleasesFound;
+                info.Message = "No published release carries a version tag.";
+                return info;
             }
 
-            if (root.TryGetProperty("assets", out var assetsProp) && assetsProp.ValueKind == JsonValueKind.Array)
+            if (!AppVersion.TryParse(info.CurrentVersion, out var current))
             {
-                string? bestUrl = null;
-                string bestDigest = string.Empty;
-                long bestSize = 0;
-
-                foreach (var asset in assetsProp.EnumerateArray())
-                {
-                    var assetName = asset.TryGetProperty("name", out var anProp) ? anProp.GetString() ?? string.Empty : string.Empty;
-                    if (assetName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var url = asset.TryGetProperty("browser_download_url", out var dlProp) ? dlProp.GetString() ?? string.Empty : string.Empty;
-                        var size = asset.TryGetProperty("size", out var sProp) ? sProp.GetInt64() : 0;
-                        var digest = asset.TryGetProperty("digest", out var dProp) ? dProp.GetString() ?? string.Empty : string.Empty;
-
-                        if (assetName.StartsWith("AgentsHub-Setup", StringComparison.OrdinalIgnoreCase))
-                        {
-                            bestUrl = url;
-                            bestSize = size;
-                            bestDigest = digest;
-                            break;
-                        }
-
-                        if (bestUrl == null)
-                        {
-                            bestUrl = url;
-                            bestSize = size;
-                            bestDigest = digest;
-                        }
-                    }
-                }
-
-                info.DownloadUrl = bestUrl ?? string.Empty;
-                info.AssetSizeBytes = bestSize;
-                info.AssetSha256 = bestDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
-                    ? bestDigest[7..]
-                    : string.Empty;
-
-                if (!string.IsNullOrEmpty(info.AssetSha256) && !string.IsNullOrEmpty(info.DownloadUrl))
-                {
-                    ExpectedDigests[info.DownloadUrl] = info.AssetSha256;
-                }
+                info.Result = UpdateCheckResult.CheckFailed;
+                info.Message = $"This build reports a version that cannot be compared: {info.CurrentVersion}.";
+                return info;
             }
 
-            if (TryParseVersion(info.LatestVersion, out var latestVer) &&
-                TryParseVersion(info.CurrentVersion, out var currentVer))
-            {
-                info.IsUpdateAvailable = latestVer > currentVer && !string.IsNullOrEmpty(info.DownloadUrl);
-                info.Result = info.IsUpdateAvailable ? UpdateCheckResult.UpdateAvailable : UpdateCheckResult.UpToDate;
-            }
-            else
-            {
-                info.Result = UpdateCheckResult.UpToDate;
-            }
+            var latest = AppVersion.Parse(info.LatestVersion);
+            bool newer = latest.IsNewerThan(current);
+
+            info.IsUpdateAvailable = newer && !string.IsNullOrEmpty(info.DownloadUrl);
+            info.InstalledIsAhead = !newer && current.IsNewerThan(latest);
+            info.Result = info.IsUpdateAvailable ? UpdateCheckResult.UpdateAvailable : UpdateCheckResult.UpToDate;
+
+            info.Message = info.IsUpdateAvailable
+                ? $"v{info.LatestVersion} is available; this build is v{info.CurrentVersion}."
+                : newer
+                    ? $"v{info.LatestVersion} is published but has no installer attached."
+                    : info.InstalledIsAhead
+                        ? $"This build (v{info.CurrentVersion}) is ahead of the newest published release (v{info.LatestVersion})."
+                        : $"Up to date (v{info.CurrentVersion}; newest published is v{info.LatestVersion}).";
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
             info.Result = UpdateCheckResult.CheckFailed;
+            info.Message = $"The release list could not be read: {ex.Message}";
         }
 
         return info;
+    }
+
+    /// <summary>
+    /// Fills <paramref name="info"/> from the release whose tag is the highest version, not the one
+    /// published most recently. Drafts are skipped, and pre-releases are used only when no stable
+    /// release exists — publishing a v1.0.0 beta must not roll everyone onto it.
+    /// </summary>
+    public static bool ReadNewestRelease(string json, UpdateInfo info)
+    {
+        JsonDocument doc;
+
+        try
+        {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        using (doc)
+        {
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return false;
+
+            JsonElement? best = null;
+            AppVersion bestVersion = default;
+            bool bestIsPreRelease = false;
+
+            foreach (var release in doc.RootElement.EnumerateArray())
+            {
+                if (release.ValueKind != JsonValueKind.Object) continue;
+                if (release.TryGetProperty("draft", out var draftProp) && draftProp.ValueKind == JsonValueKind.True) continue;
+
+                string tag = release.TryGetProperty("tag_name", out var tagProp) ? tagProp.GetString() ?? string.Empty : string.Empty;
+                if (!AppVersion.TryParse(tag, out var version)) continue;
+
+                bool preRelease = release.TryGetProperty("prerelease", out var preProp) && preProp.ValueKind == JsonValueKind.True;
+
+                // A stable release always outranks a pre-release, whatever the numbers say.
+                if (best != null)
+                {
+                    if (bestIsPreRelease && !preRelease)
+                    {
+                        // keep scanning: a stable one is strictly better
+                    }
+                    else if (!bestIsPreRelease && preRelease)
+                    {
+                        continue;
+                    }
+                    else if (!version.IsNewerThan(bestVersion))
+                    {
+                        continue;
+                    }
+                }
+
+                best = release;
+                bestVersion = version;
+                bestIsPreRelease = preRelease;
+            }
+
+            if (best is not { } chosen) return false;
+
+            info.LatestVersion = chosen.TryGetProperty("tag_name", out var chosenTag)
+                ? (chosenTag.GetString() ?? string.Empty).Trim().TrimStart('v', 'V')
+                : string.Empty;
+
+            info.ReleaseName = chosen.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? info.LatestVersion : info.LatestVersion;
+            info.ReleaseNotes = chosen.TryGetProperty("body", out var bodyProp) ? bodyProp.GetString() ?? string.Empty : string.Empty;
+
+            if (chosen.TryGetProperty("published_at", out var pubProp) && pubProp.TryGetDateTime(out var published))
+            {
+                info.PublishedAtUtc = published.ToUniversalTime();
+            }
+
+            info.DownloadUrl = string.Empty;
+            info.AssetSha256 = string.Empty;
+            info.AssetSizeBytes = 0;
+
+            if (!chosen.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array) return true;
+
+            string? bestUrl = null;
+            string bestDigest = string.Empty;
+            long bestSize = 0;
+
+            foreach (var asset in assets.EnumerateArray())
+            {
+                if (asset.ValueKind != JsonValueKind.Object) continue;
+
+                var assetName = asset.TryGetProperty("name", out var anProp) ? anProp.GetString() ?? string.Empty : string.Empty;
+                if (!assetName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+
+                var url = asset.TryGetProperty("browser_download_url", out var dlProp) ? dlProp.GetString() ?? string.Empty : string.Empty;
+                var size = asset.TryGetProperty("size", out var sProp) ? sProp.GetInt64() : 0;
+                var digest = asset.TryGetProperty("digest", out var dProp) ? dProp.GetString() ?? string.Empty : string.Empty;
+
+                if (assetName.StartsWith("AgentsHub-Setup", StringComparison.OrdinalIgnoreCase))
+                {
+                    bestUrl = url;
+                    bestSize = size;
+                    bestDigest = digest;
+                    break;
+                }
+
+                if (bestUrl == null)
+                {
+                    bestUrl = url;
+                    bestSize = size;
+                    bestDigest = digest;
+                }
+            }
+
+            info.DownloadUrl = bestUrl ?? string.Empty;
+            info.AssetSizeBytes = bestSize;
+            info.AssetSha256 = bestDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                ? bestDigest[7..]
+                : string.Empty;
+
+            if (!string.IsNullOrEmpty(info.AssetSha256) && !string.IsNullOrEmpty(info.DownloadUrl))
+            {
+                ExpectedDigests[info.DownloadUrl] = info.AssetSha256;
+            }
+
+            return true;
+        }
     }
 
     /// <summary>True only for an HTTPS asset on a host the GitHub release flow can serve from.</summary>
@@ -326,22 +432,4 @@ public sealed class UpdateService
         }
     }
 
-    private static bool TryParseVersion(string input, out Version version)
-    {
-        var cleaned = input.Trim().TrimStart('v', 'V');
-        if (Version.TryParse(cleaned, out var v))
-        {
-            version = v;
-            return true;
-        }
-
-        if (Version.TryParse(cleaned + ".0", out v))
-        {
-            version = v;
-            return true;
-        }
-
-        version = new Version(0, 0, 0);
-        return false;
-    }
 }

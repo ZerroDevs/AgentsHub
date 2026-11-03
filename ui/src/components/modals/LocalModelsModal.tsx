@@ -14,6 +14,7 @@ import {
   Power,
   Pencil,
   Check,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { webviewBridge } from '../../services/webviewBridge';
 import { Button } from '../common/Button';
@@ -28,6 +29,16 @@ interface Fit {
   haveMb: number;
 }
 
+interface ModelFlagSet {
+  contextSize?: number | null;
+  gpuLayers?: number | null;
+  cacheTypeK?: string | null;
+  cacheTypeV?: string | null;
+  flashAttention?: boolean | null;
+  extraArgs?: string | null;
+  projector?: string | null;
+}
+
 interface LocalModel {
   path: string;
   name: string;
@@ -36,6 +47,14 @@ interface LocalModel {
   managed: boolean;
   fit?: Fit;
   capabilities?: string[];
+  /** The mmproj this model would be launched with, found beside it or picked by hand. */
+  projector?: string;
+  /** False when the model looks multimodal but has no projector: the vision tag cannot be honoured. */
+  visionReady?: boolean;
+  context?: number;
+  kvMb?: number;
+  suggestedContext?: number;
+  flags?: ModelFlagSet | null;
 }
 
 interface HfResult {
@@ -86,7 +105,12 @@ function gb(mb: number): string {
  * Whether the machine can hold this file, and where. An estimate, so the wording stays a hint:
  * weights plus context never equal the download size exactly.
  */
-const FitBadge: React.FC<{ fit?: Fit }> = ({ fit }) => {
+const FitBadge: React.FC<{ fit?: Fit; context?: number; kvMb?: number; gpuUnusable?: boolean }> = ({
+  fit,
+  context,
+  kvMb,
+  gpuUnusable,
+}) => {
   if (!fit || !fit.needMb) return null;
 
   const tone =
@@ -103,12 +127,18 @@ const FitBadge: React.FC<{ fit?: Fit }> = ({ fit }) => {
         ? `RAM only · ${gb(fit.needMb)}`
         : `won't fit · ${gb(fit.needMb)}`;
 
+  // Weights alone never tell the story: the KV cache grows with context, and at a large one it can
+  // be bigger than the file. Saying where the number comes from keeps the badge honest.
+  const cache = kvMb && context ? ` (${gb(kvMb)} is KV cache at ${context.toLocaleString()} context)` : '';
+
   const hint =
     fit.where === 'gpu'
-      ? `Roughly ${gb(fit.needMb)} needed; this machine has ${gb(fit.haveMb)} of GPU memory.`
+      ? `Roughly ${gb(fit.needMb)} needed${cache}; this machine has ${gb(fit.haveMb)} of GPU memory.`
       : fit.where === 'ram'
-        ? `Roughly ${gb(fit.needMb)} needed. Larger than the ${gb(fit.haveMb)} of GPU memory, so it runs from system RAM and answers slower.`
-        : `Roughly ${gb(fit.needMb)} needed, more than the ${gb(fit.haveMb)} this machine has. It will likely fail to load.`;
+        ? gpuUnusable
+          ? `Roughly ${gb(fit.needMb)} needed${cache}. The llama.cpp build installed here has no GPU backend, so every model runs on the CPU.`
+          : `Roughly ${gb(fit.needMb)} needed${cache}. Larger than the ${gb(fit.haveMb)} of GPU memory, so it runs from system RAM and answers slower.`
+        : `Roughly ${gb(fit.needMb)} needed${cache}, more than the ${gb(fit.haveMb)} this machine has. It will likely fail to load.`;
 
   return (
     <span className={`rounded border px-1 text-[9.5px] ${tone}`} title={hint}>
@@ -116,6 +146,8 @@ const FitBadge: React.FC<{ fit?: Fit }> = ({ fit }) => {
     </span>
   );
 };
+
+const CACHE_TYPES = ['f16', 'bf16', 'q8_0', 'q5_1', 'q5_0', 'q4_1', 'q4_0', 'f32'];
 
 const CAPABILITY_LABEL: Record<string, string> = {
   vision: 'vision',
@@ -145,6 +177,15 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [tuning, setTuning] = useState<string | null>(null);
+  const [tuneDraft, setTuneDraft] = useState<ModelFlagSet>({});
+
+  // A build with no GPU device has nothing to put layers on, so the field is not a choice.
+  const cpuOnly = server?.backend === 'CPU only';
+
+  // Text of the in-flight GPU build download, or null when nothing is running.
+  const [gpuInstall, setGpuInstall] = useState<string | null>(null);
+  const gpuBusy = gpuInstall !== null;
 
   const [query, setQuery] = useState('');
   const [bucket, setBucket] = useState('all');
@@ -231,6 +272,18 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
     }
   };
 
+  const installGpuBuild = async () => {
+    setGpuInstall('Looking for the newest GPU build…');
+    setError(null);
+    try {
+      const res: any = await webviewBridge.invoke('llamacpp_install_gpu');
+      if (!res?.started) setGpuInstall(null);
+    } catch (err: any) {
+      setGpuInstall(null);
+      setError(err?.message ?? 'The GPU build could not be started.');
+    }
+  };
+
   const useDefaultDownloadFolder = async () => {
     try {
       const res: any = await webviewBridge.invoke('local_models_reset_download_folder');
@@ -280,6 +333,23 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
       }
     });
 
+    // A GPU build replaces the server binary, so its progress is the only thing to show while the
+    // download runs; the final event carries the new status.
+    const offGpu = webviewBridge.on('llama_gpu_progress', (payload: any) => {
+      if (!payload) return;
+
+      if (!payload.done) {
+        setGpuInstall(payload.line ?? 'Downloading the GPU build…');
+        return;
+      }
+
+      setGpuInstall(null);
+      if (payload.success) setNotice(payload.line ?? 'The GPU build is installed.');
+      else setError(payload.line ?? 'The GPU build could not be installed.');
+      if (payload.status) setServer(payload.status);
+      void loadModels();
+    });
+
     // The server can be started from a chat or from Settings while this dialog is open, so the rows'
     // Load/Unload buttons follow it instead of waiting for Refresh.
     const offServer = webviewBridge.on('local_server_changed', () => void loadModels());
@@ -287,6 +357,7 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
     return () => {
       offProgress?.();
       offDone?.();
+      offGpu?.();
       offServer?.();
     };
   }, []);
@@ -394,6 +465,62 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
     }
   };
 
+  /** Opens the per-model launch flags. A closed row and a different row both start from what is saved. */
+  const openTune = (model: LocalModel) => {
+    if (tuning === model.path) {
+      setTuning(null);
+      return;
+    }
+
+    setTuning(model.path);
+    setTuneDraft({ ...(model.flags ?? {}) });
+  };
+
+  const saveFlags = async (model: LocalModel) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res: any = await webviewBridge.invoke('local_models_set_flags', { path: model.path, ...tuneDraft });
+      if (res?.models) setModels(res.models);
+      if (res?.stopped) setLoadedPath('');
+      setNotice(res?.message ?? 'Saved.');
+      setTuning(null);
+      void loadModels();
+    } catch {
+      setError('The flags could not be saved.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetFlags = async (model: LocalModel) => {
+    setBusy(true);
+    try {
+      const res: any = await webviewBridge.invoke('local_models_reset_flags', { path: model.path });
+      if (res?.models) setModels(res.models);
+      if (res?.stopped) setLoadedPath('');
+      setNotice(`${model.name} uses the app-wide flags again.`);
+      setTuning(null);
+      void loadModels();
+    } catch {
+      setError('The flags could not be reset.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickProjector = async (model: LocalModel) => {
+    try {
+      const res: any = await webviewBridge.invoke('local_models_pick_projector', { path: model.path });
+      if (res?.chosen) {
+        setTuneDraft(draft => ({ ...draft, projector: res.projector }));
+        if (res?.models) setModels(res.models);
+      }
+    } catch {
+      setError('The projector could not be changed.');
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-surface-sunken/80 p-4 backdrop-blur-sm">
       <div className="flex h-[min(86vh,760px)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-surface-border bg-surface-card shadow-2xl">
@@ -405,9 +532,21 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
               {directory || 'Reading model folder…'}
             </p>
             {memory ? (
-              <p className="mt-0.5 text-[10px] text-content-dim">
-                {memory.vramMb > 0 ? `${gb(memory.vramMb)} GPU` : 'No GPU memory reported'}
+              <p
+                className="mt-0.5 truncate text-[10px] text-content-dim"
+                title={server?.backend ? `This llama.cpp build offloads to ${server.backend}` : 'The compute backend this llama.cpp build uses'}
+              >
+                {memory.vramMb > 0
+                  ? `${gb(memory.vramMb)} GPU${server?.backend === 'CPU only' ? ' (this build cannot use it)' : ''}`
+                  : 'No GPU memory reported'}
                 {memory.ramMb > 0 ? ` · ${gb(memory.ramMb)} RAM` : ''}
+                {server?.backend ? ` · ${server.backend}` : server?.installed ? ' · checking backend…' : ''}
+              </p>
+            ) : null}
+
+            {gpuInstall ? (
+              <p className="mt-0.5 truncate text-[10px] text-state-warning" title={gpuInstall}>
+                {gpuInstall}
               </p>
             ) : null}
           </div>
@@ -425,6 +564,22 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
             >
               {server?.running ? 'llama.cpp on' : server?.installed ? 'llama.cpp off' : 'no llama.cpp'}
             </span>
+
+            {cpuOnly ? (
+              <button
+                onClick={() => void installGpuBuild()}
+                disabled={gpuBusy}
+                className="flex h-7 items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 text-[11px] text-state-warning transition-colors hover:bg-amber-500/20 disabled:opacity-60"
+                title="This build has no GPU backend, so every model runs on the CPU. Downloads the official GPU-enabled build from GitHub into the app's own folder and switches the server to it. Nothing you placed by hand is overwritten."
+              >
+                {gpuBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {gpuBusy ? 'GPU build…' : 'Switch to GPU build'}
+              </button>
+            ) : null}
 
             <button
               onClick={() => void toggleServer()}
@@ -535,10 +690,8 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
               ) : (
                 <div className="space-y-1.5">
                   {models.map(model => (
-                    <div
-                      key={model.path}
-                      className="flex flex-wrap items-center gap-2 rounded-lg border border-surface-border bg-surface-deep px-3 py-2"
-                    >
+                    <div key={model.path} className="rounded-lg border border-surface-border bg-surface-deep">
+                      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           {renaming === model.path ? (
@@ -578,21 +731,62 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
                           <span className="rounded border border-surface-border px-1 text-[9px] uppercase tracking-wide text-content-dim">
                             {model.origin}
                           </span>
-                          {(model.capabilities ?? []).map(capability => (
+                          {model.flags ? (
                             <span
-                              key={capability}
-                              className="rounded border border-sky-500/25 bg-sky-500/10 px-1 text-[9.5px] text-accent"
-                              title="Read from the file name, since a local file carries no metadata"
+                              className="rounded border border-violet-500/30 bg-violet-500/10 px-1 text-[9px] uppercase tracking-wide text-content-muted"
+                              title="This model has its own launch flags"
                             >
-                              {CAPABILITY_LABEL[capability] ?? capability}
+                              custom
                             </span>
-                          ))}
-                          <FitBadge fit={model.fit} />
+                          ) : null}
+                          {(model.capabilities ?? []).map(capability => {
+                            // A vision tag with no projector behind it promises what the launch cannot keep.
+                            const blind = capability === 'vision' && !model.visionReady;
+
+                            return (
+                              <span
+                                key={capability}
+                                className={`rounded border px-1 text-[9.5px] ${
+                                  blind
+                                    ? 'border-amber-500/30 bg-amber-500/10 text-state-warning'
+                                    : 'border-sky-500/25 bg-sky-500/10 text-accent'
+                                }`}
+                                title={
+                                  blind
+                                    ? 'Vision needs its mmproj projector beside the file. Until then an image is refused, not silently ignored.'
+                                    : 'Read from the file name, since a local file carries no metadata'
+                                }
+                              >
+                                {CAPABILITY_LABEL[capability] ?? capability}
+                                {blind ? ' · no projector' : ''}
+                              </span>
+                            );
+                          })}
+                          <FitBadge
+                            fit={model.fit}
+                            context={model.context}
+                            kvMb={model.kvMb}
+                            gpuUnusable={server?.backend === 'CPU only'}
+                          />
                         </div>
                         <p className="truncate font-mono text-[10px] text-content-dim" title={model.path}>
                           {sizeLabel(model.size)} · {model.path}
                         </p>
                       </div>
+
+                      <button
+                        onClick={() => openTune(model)}
+                        className={`flex h-7 items-center gap-1 rounded-lg border px-2 text-[11px] transition-colors ${
+                          tuning === model.path
+                            ? 'border-sky-500/40 text-accent'
+                            : 'border-surface-border text-content-muted hover:text-content-main'
+                        }`}
+                        title="Launch flags for this model only: context, cache, projector"
+                        aria-expanded={tuning === model.path}
+                      >
+                        <SlidersHorizontal className="h-3 w-3" />
+                        Flags
+                      </button>
 
                       {loadedPath && loadedPath === model.path && server?.running ? (
                         <>
@@ -633,6 +827,167 @@ export const LocalModelsModal: React.FC<LocalModelsModalProps> = ({ onClose }) =
                         <Trash2 className="h-3 w-3" />
                         {model.managed ? 'Delete' : 'Forget'}
                       </button>
+                      </div>
+
+                      {tuning === model.path && (
+                        <div className="grid grid-cols-2 gap-2 border-t border-surface-border px-3 py-2 text-[10.5px] sm:grid-cols-4">
+                          <label className="flex flex-col gap-0.5">
+                            <span className="text-content-dim">Context</span>
+                            <input
+                              type="number"
+                              min={8192}
+                              step={1024}
+                              value={tuneDraft.contextSize ?? ''}
+                              placeholder={model.context ? String(model.context) : 'app default'}
+                              onChange={event =>
+                                setTuneDraft(draft => ({
+                                  ...draft,
+                                  contextSize: event.target.value ? Number(event.target.value) : null,
+                                }))
+                              }
+                              className="rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[10.5px] text-content-main focus:border-sky-500 focus:outline-none"
+                            />
+                          </label>
+
+                          <label className="flex flex-col gap-0.5">
+                            <span className="text-content-dim">GPU layers</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={512}
+                              value={tuneDraft.gpuLayers ?? ''}
+                              placeholder={cpuOnly ? 'no GPU device' : 'app default'}
+                              disabled={cpuOnly}
+                              onChange={event =>
+                                setTuneDraft(draft => ({
+                                  ...draft,
+                                  gpuLayers: event.target.value ? Number(event.target.value) : null,
+                                }))
+                              }
+                              className="rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[10.5px] text-content-main focus:border-sky-500 focus:outline-none disabled:opacity-40"
+                            />
+                          </label>
+
+                          <label className="flex flex-col gap-0.5">
+                            <span className="text-content-dim">Cache K</span>
+                            <select
+                              value={tuneDraft.cacheTypeK ?? ''}
+                              onChange={event =>
+                                setTuneDraft(draft => ({ ...draft, cacheTypeK: event.target.value || null }))
+                              }
+                              className="rounded border border-surface-border bg-surface-deep px-1 py-0.5 font-mono text-[10.5px] text-content-main focus:border-sky-500 focus:outline-none"
+                            >
+                              <option value="">app default</option>
+                              {CACHE_TYPES.map(type => (
+                                <option key={type} value={type}>
+                                  {type}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <label className="flex flex-col gap-0.5">
+                            <span className="text-content-dim">Cache V</span>
+                            <select
+                              value={tuneDraft.cacheTypeV ?? ''}
+                              onChange={event =>
+                                setTuneDraft(draft => ({ ...draft, cacheTypeV: event.target.value || null }))
+                              }
+                              className="rounded border border-surface-border bg-surface-deep px-1 py-0.5 font-mono text-[10.5px] text-content-main focus:border-sky-500 focus:outline-none"
+                            >
+                              <option value="">app default</option>
+                              {CACHE_TYPES.map(type => (
+                                <option key={type} value={type}>
+                                  {type}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <label className="flex flex-col gap-0.5">
+                            <span className="text-content-dim">Flash attention</span>
+                            <select
+                              value={
+                                tuneDraft.flashAttention === null || tuneDraft.flashAttention === undefined
+                                  ? ''
+                                  : tuneDraft.flashAttention
+                                    ? 'on'
+                                    : 'off'
+                              }
+                              onChange={event =>
+                                setTuneDraft(draft => ({
+                                  ...draft,
+                                  flashAttention: event.target.value === '' ? null : event.target.value === 'on',
+                                }))
+                              }
+                              className="rounded border border-surface-border bg-surface-deep px-1 py-0.5 text-[10.5px] text-content-main focus:border-sky-500 focus:outline-none"
+                            >
+                              <option value="">app default</option>
+                              <option value="on">on</option>
+                              <option value="off">off</option>
+                            </select>
+                          </label>
+
+                          <label className="col-span-2 flex flex-col gap-0.5 sm:col-span-3">
+                            <span className="text-content-dim">Extra arguments</span>
+                            <input
+                              value={tuneDraft.extraArgs ?? ''}
+                              placeholder="app default"
+                              onChange={event =>
+                                setTuneDraft(draft => ({ ...draft, extraArgs: event.target.value || null }))
+                              }
+                              className="rounded border border-surface-border bg-surface-deep px-1.5 py-0.5 font-mono text-[10.5px] text-content-main focus:border-sky-500 focus:outline-none"
+                            />
+                          </label>
+
+                          <div className="col-span-2 flex flex-wrap items-center gap-1.5 sm:col-span-4">
+                            <span className="text-content-dim">Projector</span>
+                            <span
+                              className="min-w-0 flex-1 truncate font-mono text-[10px] text-content-muted"
+                              title={tuneDraft.projector ?? model.projector ?? 'No projector'}
+                            >
+                              {tuneDraft.projector ?? model.projector ?? 'none — a vision model needs one'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => void pickProjector(model)}
+                              className="rounded border border-surface-border px-1.5 py-0.5 text-[10px] text-content-muted hover:text-content-main"
+                            >
+                              Choose…
+                            </button>
+                          </div>
+
+                          <div className="col-span-2 flex flex-wrap items-center gap-1.5 sm:col-span-4">
+                            {model.suggestedContext ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setTuneDraft(draft => ({ ...draft, contextSize: model.suggestedContext ?? null }))
+                                }
+                                className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-state-success"
+                                title="The largest context this model still fits in, counting the KV cache"
+                              >
+                                Use {model.suggestedContext.toLocaleString()}
+                              </button>
+                            ) : null}
+                            <Button size="xs" disabled={busy} onClick={() => void saveFlags(model)}>
+                              Save flags
+                            </Button>
+                            <button
+                              type="button"
+                              onClick={() => void resetFlags(model)}
+                              className="text-[10px] text-content-dim underline decoration-dotted hover:text-content-main"
+                            >
+                              Use app defaults
+                            </button>
+                            {model.kvMb ? (
+                              <span className="ml-auto font-mono text-[9.5px] text-content-dim">
+                                KV cache ≈ {gb(model.kvMb)} at {(model.context ?? 0).toLocaleString()}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

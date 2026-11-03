@@ -214,29 +214,37 @@ public sealed partial class DashboardWebBridge : IDisposable
                 // Background warmup failure is non-fatal
             }
         });
+    }
+#endif
 
-        // Silent background update check after 6 seconds
+    /// <summary>
+    /// One silent update check per launch, on every host.
+    ///
+    /// It used to live beside the WebView2 hookup, which only exists in the desktop build, so the
+    /// server host never checked at all. The release read is plain HTTPS and belongs to neither.
+    /// </summary>
+    private static void StartBackgroundUpdateCheck(Action<object> postEvent)
+    {
         _ = Task.Run(async () =>
         {
             try
             {
+                // Late enough that the first screen is painted and the check is not in its way.
                 await Task.Delay(6000).ConfigureAwait(false);
                 var update = await UpdateService.Instance.CheckForUpdatesAsync().ConfigureAwait(false);
-                if (update.IsUpdateAvailable)
-                {
-                    PostEventToUi("update_available", update);
-                }
+                if (update.IsUpdateAvailable) postEvent(update);
             }
             catch
             {
-                // Silent check failure
+                // A silent check that fails must stay silent: the About card retries on demand.
             }
         });
     }
-#endif
 
     private void HookBackendEvents()
     {
+        StartBackgroundUpdateCheck(update => PostEventToUi("update_available", update));
+
         _cliManager.StatusChanged += (type, state, msg) =>
         {
             UpdateDiscordRpcAgents();
@@ -612,6 +620,10 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             case "qwen_login":
                 await HandleQwenLoginAsync(requestId).ConfigureAwait(false);
+                break;
+
+            case "web_upload_probe":
+                await HandleWebUploadProbeAsync(data, requestId).ConfigureAwait(false);
                 break;
 
             case "qwen_open":
@@ -1387,6 +1399,10 @@ public sealed partial class DashboardWebBridge : IDisposable
                 await HandleLlamaCppUpdateAsync(requestId).ConfigureAwait(false);
                 break;
 
+            case "llamacpp_install_gpu":
+                HandleLlamaCppInstallGpu(requestId);
+                break;
+
             case "local_models_list":
                 await HandleLocalModelsListAsync(requestId).ConfigureAwait(false);
                 break;
@@ -1475,6 +1491,40 @@ public sealed partial class DashboardWebBridge : IDisposable
                 await HandleLocalModelsRunAsync(data, requestId).ConfigureAwait(false);
                 break;
 
+            case "attachment_begin":
+                await HandleAttachmentBeginAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "attachment_chunk":
+                await HandleAttachmentChunkAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "attachment_end":
+                await HandleAttachmentEndAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "attachment_abort":
+                await HandleAttachmentAbortAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_set_flags":
+                await HandleLocalModelsSetFlagsAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_reset_flags":
+                await HandleLocalModelsResetFlagsAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "local_models_pick_projector":
+                await HandleLocalModelsPickProjectorAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+#if DEEPSEEK_UI
+            case "local_chat_forget":
+                HandleLocalChatForget(data, requestId);
+                break;
+#endif
+
             case "open_terminal_at":
                 await HandleOpenTerminalAtAsync(data, requestId).ConfigureAwait(false);
                 break;
@@ -1497,6 +1547,14 @@ public sealed partial class DashboardWebBridge : IDisposable
 
             case "get_workspace_files":
                 await HandleGetWorkspaceFilesAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "read_workspace_file":
+                await HandleReadWorkspaceFileAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "save_workspace_file":
+                await HandleSaveWorkspaceFileAsync(data, requestId).ConfigureAwait(false);
                 break;
 
             case "get_token_telemetry":

@@ -74,7 +74,18 @@ class WebViewBridge {
       clearTimeout(pending.timer);
 
       if (parsed.success === false) {
-        pending.reject(new Error(parsed.error || parsed.data || 'Action failed'));
+        // The host reports a failed action with its payload, not an `error` field, so `new
+        // Error(payload)` used to render as "[object Object]" wherever the message was shown.
+        const failure = parsed.error ?? parsed.data;
+        const message =
+          typeof failure === 'string'
+            ? failure
+            : failure && typeof failure === 'object'
+              ? [failure.message, failure.error].find(value => typeof value === 'string') ??
+                'The action failed.'
+              : 'The action failed.';
+
+        pending.reject(new Error(message));
       } else {
         pending.resolve(parsed.data);
       }
@@ -160,7 +171,7 @@ class WebViewBridge {
 
     if (action === 'get_initial_state') {
       mockData = {
-        version: 'v2.0.0 (Dev Host)',
+        version: `v${__APP_VERSION__} (Dev Host)`,
         lanIp: '127.0.0.1',
         lanUrl: 'http://127.0.0.1:9095/',
         lanProxyPort: 9191,
@@ -335,7 +346,7 @@ class WebViewBridge {
         pid: 3412,
         latencyMs: 1,
         activeSessions: 1,
-        version: 'v2.0.0 (Bun Engine)',
+        version: `v${__APP_VERSION__} (Bun Engine)`,
       };
     } else if (action === 'get_system_telemetry') {
       mockData = {
@@ -386,6 +397,45 @@ class WebViewBridge {
           { name: 'contrast-check.py', path: '.agents/skills/antislop-human/contrast-check.py', isDirectory: false, extension: '.py' },
           { name: 'contrast-mcp.py', path: '.gemini/skills/antislop-human/contrast-mcp.py', isDirectory: false, extension: '.py' },
         ],
+      };
+    } else if (action === 'read_workspace_file') {
+      // Sample source so the viewer's highlighting and editor are reachable without the host.
+      const sample = [
+        '"""Counter window: one label, one button, no state outside this module."""',
+        '',
+        'from tkinter import Button, Label, Tk',
+        '',
+        'count = 0',
+        '',
+        '',
+        'def bump() -> None:',
+        '    global count',
+        '    count += 1',
+        '    label.config(text=f"Clicked {count} times")',
+        '',
+        '',
+        'root = Tk()',
+        'root.title("Hello")',
+        'label = Label(root, text="Clicked 0 times")',
+        'label.pack(padx=24, pady=12)',
+        'Button(root, text="Click me", command=bump).pack(pady=12)',
+        'root.mainloop()',
+      ].join('\n');
+      const mockPath = typeof payload?.path === 'string' ? payload.path : 'app.py';
+      mockData = {
+        path: mockPath,
+        rootPath: 'C:\\Projects\\ChessSenseV2',
+        extension: (mockPath.split('.').pop() || '').toLowerCase(),
+        sizeBytes: sample.length,
+        truncated: false,
+        binary: false,
+        text: sample,
+      };
+    } else if (action === 'save_workspace_file') {
+      mockData = {
+        saved: true,
+        path: payload?.path,
+        sizeBytes: typeof payload?.text === 'string' ? payload.text.length : 0,
       };
     }
 

@@ -12,7 +12,29 @@ public sealed record LocalModel(
     long SizeBytes,
     string Origin,
     bool Managed,
-    string[] Capabilities);
+    string[] Capabilities,
+    string ProjectorPath = "",
+    bool VisionReady = false);
+
+/// <summary>
+/// Launch flags for one model, falling back to the app-wide runtime when a field is null.
+///
+/// A 2B and a 30B do not want the same context: the small one can afford a huge cache, the large one
+/// cannot, and one global setting forced a choice that suited neither.
+/// </summary>
+public sealed record ModelFlags(
+    int? ContextSize = null,
+    int? GpuLayers = null,
+    string? CacheTypeK = null,
+    string? CacheTypeV = null,
+    bool? FlashAttention = null,
+    string? ExtraArgs = null,
+    string? Projector = null)
+{
+    public bool IsEmpty => ContextSize is null && GpuLayers is null && CacheTypeK is null
+        && CacheTypeV is null && FlashAttention is null && string.IsNullOrWhiteSpace(ExtraArgs)
+        && string.IsNullOrWhiteSpace(Projector);
+}
 
 /// <summary>A GGUF repository as Hugging Face lists it, plus the tags a person actually filters on.</summary>
 public sealed record HfModel(string Id, long Downloads, long Likes, string Pipeline, string[] Tags, string ParamLabel, string[] Capabilities);
@@ -84,8 +106,82 @@ public sealed class LlamaModelLibrary
         /// <summary>Display names, keyed by model path. The file on disk keeps its own name.</summary>
         public Dictionary<string, string> Names { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>Per-model launch flags, keyed by model path.</summary>
+        public Dictionary<string, ModelFlags> Overrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>Where downloads land. Empty means the app's own models folder.</summary>
         public string DownloadDirectory { get; set; } = "";
+    }
+
+    // ---- per-model flags ----
+
+    /// <summary>The flags set for one model, or null when it runs on the app-wide runtime.</summary>
+    public ModelFlags? FlagsFor(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+
+        var shelf = Load();
+        if (shelf.Overrides.TryGetValue(path, out var direct) && direct is not null) return direct;
+
+        // A dictionary read from JSON comes back case-sensitive, while Windows paths are not.
+        foreach (var entry in shelf.Overrides)
+        {
+            if (string.Equals(entry.Key, path, StringComparison.OrdinalIgnoreCase)) return entry.Value;
+        }
+
+        return null;
+    }
+
+    public void SetFlags(string path, ModelFlags flags)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+
+        var shelf = Load();
+        string key = shelf.Overrides.Keys.FirstOrDefault(k => string.Equals(k, path, StringComparison.OrdinalIgnoreCase)) ?? path;
+
+        if (flags.IsEmpty) shelf.Overrides.Remove(key);
+        else shelf.Overrides[key] = flags;
+
+        Save(shelf);
+    }
+
+    public void ResetFlags(string path)
+    {
+        var shelf = Load();
+        var keys = shelf.Overrides.Keys.Where(k => string.Equals(k, path, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (keys.Count == 0) return;
+
+        foreach (string key in keys) shelf.Overrides.Remove(key);
+        Save(shelf);
+    }
+
+    /// <summary>
+    /// The projector this model needs before it can see an image: the one the person picked, else the
+    /// first `mmproj` file sitting beside it, which is how a GGUF vision repo ships.
+    /// </summary>
+    public string ProjectorFor(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+
+        string chosen = FlagsFor(path)?.Projector?.Trim() ?? string.Empty;
+        if (chosen.Length > 0 && File.Exists(chosen)) return chosen;
+
+        try
+        {
+            string? folder = Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) return string.Empty;
+
+            foreach (string file in Directory.EnumerateFiles(folder, "*.gguf"))
+            {
+                if (IsProjector(file)) return file;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // An unreadable folder means no projector is known; the model still runs as text.
+        }
+
+        return string.Empty;
     }
 
     private Shelf Load()
@@ -426,17 +522,23 @@ public sealed class LlamaModelLibrary
 
     // ---- helpers ----
 
-    private static LocalModel Describe(string path, string origin, bool managed, string? displayName = null)
+    private LocalModel Describe(string path, string origin, bool managed, string? displayName = null)
     {
+        // A local file carries no metadata, so its tags come from the name and its folder — the
+        // only things a person can see anyway.
+        var capabilities = CapabilitiesOf(path.Replace('\\', ' ').Replace('/', ' '), string.Empty, []);
+        string projector = ProjectorFor(path);
+
         return new LocalModel(
             path,
             string.IsNullOrWhiteSpace(displayName) ? Path.GetFileNameWithoutExtension(path) : displayName.Trim(),
             FileSize(path),
             origin,
             managed,
-            // A local file carries no metadata, so its tags come from the name and its folder — the
-            // only things a person can see anyway.
-            CapabilitiesOf(path.Replace('\\', ' ').Replace('/', ' '), string.Empty, []));
+            capabilities,
+            projector,
+            // A vision tag with no projector behind it is a promise the launch cannot keep.
+            projector.Length > 0 && capabilities.Contains("vision"));
     }
 
     /// <summary>
@@ -456,9 +558,13 @@ public sealed class LlamaModelLibrary
         }
     }
 
-    /// <summary>A multimodal projector is not a model: llama.cpp loads it alongside one.</summary>
+    /// <summary>
+    /// A multimodal projector is not a model: llama.cpp loads it alongside one with `--mmproj`.
+    /// Repositories name it `mmproj-model-f16.gguf` or `Qwen2-VL-mmproj-Q8_0.gguf`, so the marker can
+    /// sit anywhere in the name.
+    /// </summary>
     private static bool IsProjector(string path) =>
-        Path.GetFileName(path).StartsWith("mmproj", StringComparison.OrdinalIgnoreCase);
+        Path.GetFileName(path).Contains("mmproj", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// What the model can do, as far as its own metadata says — for a local file that is only its

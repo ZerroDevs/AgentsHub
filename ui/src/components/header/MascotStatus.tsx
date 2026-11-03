@@ -35,7 +35,7 @@ export const MascotStatus: React.FC<MascotStatusProps> = ({
         <span className="text-xs font-bold text-content-main tracking-tight flex items-center gap-1.5">
           <span>Agents Hub</span>
           <span className="px-1 py-0.2 rounded text-[9px] font-mono font-semibold bg-sky-500/15 text-accent border border-sky-500/30">
-            v2.0
+            v{__APP_VERSION__}
           </span>
         </span>
         <span className="text-[10px] font-mono text-content-muted">

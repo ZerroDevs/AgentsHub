@@ -13,6 +13,10 @@ namespace AgentsHub.Services.DeepSeek;
 /// model a fenced `tool` block holding one JSON object, executes it, and sends the results back as
 /// the next message. Actions that touch the disk or the shell are marked destructive and are held
 /// for approval before they run.
+///
+/// It is only for surfaces without function calling: the DeepSeek and Qwen web pages
+/// (<see cref="Guide"/>) and a local llama.cpp chat (<see cref="LocalGuide"/>). Agents that bring
+/// their own tool loop — Claude Code, OpenCode, Antigravity, the CLI engines — are never sent it.
 /// </summary>
 internal static class DeepSeekTools
 {
@@ -66,17 +70,18 @@ internal static class DeepSeekTools
     /// </summary>
     public const string Sentinel = "[[agents-hub-tool-protocol v1]]";
 
-    public static string Guide(string root, IReadOnlyList<SkillEntry> skills, IReadOnlyList<McpToolInfo>? mcpTools = null)
+    /// <summary>
+    /// The full protocol, for a chat surface with no function calling: DeepSeek's and Qwen's web
+    /// pages. Both are primed with it as their first message, so it closes by asking for a one-line
+    /// acknowledgement. A local model gets <see cref="LocalGuide"/> instead.
+    /// </summary>
+    public static string Guide(
+        string root,
+        IReadOnlyList<SkillEntry> skills,
+        IReadOnlyList<McpToolInfo>? mcpTools = null)
     {
-        string skillSection = skills.Count == 0
-            ? string.Empty
-            : "\n\nSKILLS\n  This project ships skills. Load one with `read_skill` before relying on it.\n"
-              + string.Join('\n', skills.Select(s => $"  - {s.Name}: {s.Description}"));
-
-        string mcpSection = mcpTools is null || mcpTools.Count == 0
-            ? string.Empty
-            : "\n\nMCP TOOLS\n  Servers expose tools you may call with `mcp_call`. Names are server.tool.\n"
-              + string.Join('\n', mcpTools.Select(t => $"  - {t.Server}.{t.Name}: {t.Description}"));
+        string skillSection = SkillSection(skills);
+        string mcpSection = McpSection(mcpTools);
 
         return $$"""
             {{Sentinel}}
@@ -97,6 +102,15 @@ internal static class DeepSeekTools
 
               The client executes every block in the order written and sends you the results as the
               next message. Never describe, quote, or assume the contents of a file you have not read.
+
+            EXAMPLE
+              User: read app.py and tell me what it does
+              You:
+              ```tool
+              {"action": "read_file", "path": "app.py"}
+              ```
+              Then the file arrives and you explain it. You do not answer from memory, and you do not
+              write the file contents yourself.
 
             ACTIONS
               list_dir     {"action": "list_dir", "path": "."}
@@ -130,24 +144,97 @@ internal static class DeepSeekTools
             """;
     }
 
+    /// <summary>
+    /// The protocol a local model gets, for a server on 127.0.0.1 instead of a web page.
+    ///
+    /// Same block, same actions, a fraction of the words. The full guide spends its first half
+    /// explaining itself to a webpage, which a 2B paying for every token cannot afford: it read the
+    /// document instead of the request, and its answer was about the protocol. Everything here is
+    /// load-bearing — the example is what gets a small model to emit a block at all, and the turn
+    /// loop in <see cref="LlamaCpp.LocalChatEngine"/> enforces the rules the long version only states.
+    /// </summary>
+    public static string LocalGuide(
+        string root,
+        IReadOnlyList<SkillEntry> skills,
+        IReadOnlyList<McpToolInfo>? mcpTools = null)
+    {
+        var actions = new List<string>
+        {
+            "  list_dir     {\"action\": \"list_dir\", \"path\": \".\"}",
+            "  read_file    {\"action\": \"read_file\", \"path\": \"app.py\"}",
+            "  search_text  {\"action\": \"search_text\", \"query\": \"TODO\", \"path\": \".\"}",
+            "  write_file   {\"action\": \"write_file\", \"path\": \"app.py\", \"content\": \"whole file\"}",
+            "  apply_patch  {\"action\": \"apply_patch\", \"path\": \"app.py\", \"old_text\": \"exact\", \"new_text\": \"new\"}",
+            "  run_command  {\"action\": \"run_command\", \"command\": \"python app.py\"}",
+            "  move_file    {\"action\": \"move_file\", \"from\": \"a.py\", \"to\": \"b.py\"}",
+            "  delete_file  {\"action\": \"delete_file\", \"path\": \"old.py\"}",
+        };
+
+        // Only the actions this project can actually reach: a list of names a small model cannot use
+        // is tokens spent on noise.
+        if (skills.Count > 0) actions.Add("  read_skill   {\"action\": \"read_skill\", \"name\": \"skill-name\"}");
+        if (mcpTools is { Count: > 0 }) actions.Add("  mcp_call     {\"action\": \"mcp_call\", \"server\": \"name\", \"tool\": \"tool\", \"args\": {}}");
+
+        return $$"""
+            You can read and write files and run commands in {{root}}.
+            Paths are relative to it, and nothing outside it is reachable.
+
+            ASKING FOR AN ACTION
+              Reply with one fenced block tagged tool, holding one JSON object and nothing else:
+
+              ```tool
+              {"action": "read_file", "path": "app.py"}
+              ```
+
+              The app runs it and sends you the result. Then answer, or ask for the next action.
+              Read a file before saying what is in it. When the request needs nothing from the disk,
+              or you are finished, answer with no block.
+
+            ACTIONS
+              {{string.Join('\n', actions).TrimStart()}}
+
+            RULES
+              - Read a file before changing it, and build the new text from what you actually got back.
+              - To change a file, send the write_file or apply_patch block itself. Never paste the file
+                into the chat.
+              - write_file replaces the whole file; apply_patch swaps one exact snippet copied from it.
+              - write_file, apply_patch, run_command, move_file and delete_file ask the user first. If
+                the user declines, do not retry the same call; explain what you need instead.
+            {{SkillSection(skills)}}{{McpSection(mcpTools)}}
+            """;
+    }
+
+    private static string SkillSection(IReadOnlyList<SkillEntry> skills) => skills.Count == 0
+        ? string.Empty
+        : "\n\nSKILLS\n  This project ships skills. Load one with `read_skill` before relying on it.\n"
+          + string.Join('\n', skills.Select(s => $"  - {s.Name}: {s.Description}"));
+
+    private static string McpSection(IReadOnlyList<McpToolInfo>? mcpTools) => mcpTools is null || mcpTools.Count == 0
+        ? string.Empty
+        : "\n\nMCP TOOLS\n  Servers expose tools you may call with `mcp_call`. Names are server.tool.\n"
+          + string.Join('\n', mcpTools.Select(t => $"  - {t.Server}.{t.Name}: {t.Description}"));
+
     // ---------------------------------------------------------------- parsing
 
-    private static readonly Regex ToolBlock = new(@"```[ \t]*tool[ \t]*\r?\n(.*?)```", RegexOptions.Singleline);
-    private static readonly Regex AnyBlock = new(@"```[ \t]*(?:tool|json)?[ \t]*\r?\n(.*?)```", RegexOptions.Singleline);
+    // The line break after the tag is optional. A small model often writes ```tool{"action":…} on one
+    // line, and a rule that required the break let that request through as ordinary text.
+    private static readonly Regex ToolBlock = new(@"```[ \t]*tool[ \t]*\r?\n?(.*?)```", RegexOptions.Singleline);
+    private static readonly Regex AnyBlock = new(@"```[ \t]*(?:tool|json)?[ \t]*\r?\n?(.*?)```", RegexOptions.Singleline);
+    private static readonly Regex BareAction = new("\\{\\s*\"action\"\\s*:", RegexOptions.None);
 
     /// <summary>
     /// Pulls tool requests out of a reply. The `tool` tag is primary; any fenced JSON naming a known
-    /// action is accepted as a fallback, because models drift.
+    /// action is accepted as a fallback, and so is a bare object, because models drift.
     /// </summary>
     public static List<JsonElement> Extract(string answer)
     {
         var calls = new List<JsonElement>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var match in ToolBlock.Matches(answer).Cast<Match>().Concat(AnyBlock.Matches(answer).Cast<Match>()))
+        bool TryAdd(string body)
         {
-            string body = match.Groups[1].Value.Trim();
-            if (body.Length == 0 || !seen.Add(body)) continue;
+            body = body.Trim();
+            if (body.Length == 0 || !seen.Add(body)) return false;
 
             JsonElement parsed;
             try
@@ -157,29 +244,134 @@ internal static class DeepSeekTools
             }
             catch (JsonException)
             {
-                continue;
+                return false;
             }
 
-            if (parsed.ValueKind != JsonValueKind.Object) continue;
-            if (!parsed.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String) continue;
-            if (!Actions.Contains(action.GetString(), StringComparer.Ordinal)) continue;
+            if (parsed.ValueKind != JsonValueKind.Object) return false;
+            if (!parsed.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String) return false;
+            if (!Actions.Contains(action.GetString(), StringComparer.Ordinal)) return false;
 
             // Keep the whole object. Returning only the inner `args` dropped the `action` field,
             // which then arrived at Execute as "?" and failed as an unknown action. Callers read
             // flat keys first and fall back to the nested `args` object themselves.
             calls.Add(parsed);
+            return true;
+        }
+
+        var fenced = new List<(int Start, int End)>();
+
+        foreach (var match in ToolBlock.Matches(answer).Cast<Match>().Concat(AnyBlock.Matches(answer).Cast<Match>()))
+        {
+            fenced.Add((match.Index, match.Index + match.Length));
+            TryAdd(match.Groups[1].Value);
+        }
+
+        // A small model often skips the fence and prints the object on its own. Reading that is the
+        // difference between a tool step and a paragraph describing the step it meant to take.
+        // Only when no block was understood: a reply that explains the protocol also quotes it, and
+        // running that quote would read a file nobody asked for.
+        if (calls.Count > 0) return calls;
+
+        foreach (Match start in BareAction.Matches(answer))
+        {
+            if (fenced.Any(f => start.Index >= f.Start && start.Index < f.End)) continue;
+
+            string? body = BalancedObject(answer, start.Index);
+            if (body != null) TryAdd(body);
         }
 
         return calls;
     }
 
-    /// <summary>Drops the control blocks from a reply and keeps ordinary prose and code.</summary>
-    public static string Strip(string answer)
+    /// <summary>
+    /// The complete JSON object starting at `start`, or null when the reply was cut off before it
+    /// closed. Braces inside string literals are skipped, so file content cannot end it early.
+    /// </summary>
+    private static string? BalancedObject(string text, int start)
     {
-        string cleaned = ToolBlock.Replace(answer, string.Empty);
-        cleaned = AnyBlock.Replace(cleaned, match => IsToolBlock(match.Groups[1].Value) ? string.Empty : match.Value);
-        return cleaned.Trim();
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = start; i < text.Length; i++)
+        {
+            char c = text[i];
+
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+
+            if (c == '"') inString = true;
+            else if (c == '{') depth++;
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0) return text[start..(i + 1)];
+            }
+        }
+
+        return null;
     }
+
+    /// <summary>
+    /// Actions a reply asked for that this client does not have.
+    ///
+    /// A small model invents names — `edit_file`, `patch`, `write` — and the call then goes nowhere,
+    /// leaving the reply's JSON on screen as if it were an answer. Naming the miss is what turns that
+    /// into a second, usable attempt.
+    /// </summary>
+    public static List<string> UnknownActions(string answer)
+    {
+        var unknown = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void Collect(string body)
+        {
+            JsonElement parsed;
+            try
+            {
+                using var doc = JsonDocument.Parse(body.Trim());
+                parsed = doc.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                return;
+            }
+
+            if (parsed.ValueKind != JsonValueKind.Object) return;
+            if (!parsed.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.String) return;
+
+            string name = action.GetString() ?? string.Empty;
+            if (name.Length == 0 || Actions.Contains(name, StringComparer.Ordinal)) return;
+            if (seen.Add(name)) unknown.Add(name);
+        }
+
+        foreach (var match in ToolBlock.Matches(answer).Cast<Match>().Concat(AnyBlock.Matches(answer).Cast<Match>()))
+        {
+            Collect(match.Groups[1].Value);
+        }
+
+        foreach (Match start in BareAction.Matches(answer))
+        {
+            string? body = BalancedObject(answer, start.Index);
+            if (body != null) Collect(body);
+        }
+
+        return unknown;
+    }
+
+    /// <summary>
+    /// The settled answer: what a person should read.
+    ///
+    /// Routed through <see cref="Visible"/> so a block the reply never closed is dropped too. Cutting
+    /// only completed fences left a model that ran out of tokens mid-block with its JSON sitting in the
+    /// transcript as if it were prose.
+    /// </summary>
+    public static string Strip(string answer) => Visible(answer, holdIncompleteFence: false).Trim();
 
     /// <summary>
     /// The visible part of a partially streamed answer.
@@ -188,7 +380,7 @@ internal static class DeepSeekTools
     /// the raw JSON is already in the message. Text from an unterminated fence is held back, and a
     /// completed fence is included only when it is ordinary code.
     /// </summary>
-    public static string Visible(string partial)
+    public static string Visible(string partial, bool holdIncompleteFence = true)
     {
         var sb = new StringBuilder(partial.Length);
         int index = 0;
@@ -198,7 +390,14 @@ internal static class DeepSeekTools
             int open = partial.IndexOf("```", index, StringComparison.Ordinal);
             if (open < 0)
             {
-                sb.Append(partial, index, partial.Length - index);
+                int end = partial.Length;
+
+                // One or two backticks at the very end may be a fence that has not arrived yet; sending
+                // them put a lone "`" in the reply. The settled answer turns this off, because there it
+                // can only be a real trailing backtick.
+                while (holdIncompleteFence && end > index && partial[end - 1] == '`' && partial.Length - end < 2) end--;
+
+                sb.Append(partial, index, end - index);
                 break;
             }
 
@@ -208,11 +407,50 @@ internal static class DeepSeekTools
             if (close < 0) break;   // still streaming the block: hold everything from here
 
             string body = partial[(open + 3)..close];
-            if (!IsToolBlock(body)) sb.Append(partial, open, close + 3 - open);
             index = close + 3;
+
+            // A `tool` fence is a request even when its JSON did not parse, so the tag alone keeps it
+            // out of the reply.
+            if (!IsToolBlock(body) && ToolTagLength(body.TrimStart()) == 0)
+            {
+                sb.Append(partial, open, close + 3 - open);
+                continue;
+            }
+
+            // Taking the blank line the block sat in keeps the paragraphs around it together instead
+            // of leaving two empty lines where the request used to be.
+            index += BlankLineLength(partial, index);
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>The length of one blank line at `index`, or 0 when there is none.</summary>
+    private static int BlankLineLength(string text, int index)
+    {
+        int i = index;
+        int newlines = 0;
+
+        while (i < text.Length && newlines < 2)
+        {
+            if (text[i] == '\n') { newlines++; i++; }
+            else if (text[i] == '\r') i++;
+            else return 0;
+        }
+
+        return newlines == 2 ? i - index : 0;
+    }
+
+    /// <summary>The length of a leading `tool` fence tag, or 0 when the text does not start with one.</summary>
+    private static int ToolTagLength(string text)
+    {
+        const string Tag = "tool";
+        if (!text.StartsWith(Tag, StringComparison.Ordinal)) return 0;
+        if (text.Length == Tag.Length) return Tag.Length;
+
+        // `toolbox` is a language, not our tag.
+        char next = text[Tag.Length];
+        return char.IsLetterOrDigit(next) || next == '_' ? 0 : Tag.Length;
     }
 
     private static bool IsToolBlock(string body)
@@ -227,6 +465,10 @@ internal static class DeepSeekTools
             string first = text[..newline].Trim();
             if (first.Length > 0 && !first.Contains('{')) text = text[(newline + 1)..].Trim();
         }
+
+        // Tag and object on the same line, which the newline rule above cannot see.
+        int tag = ToolTagLength(text);
+        if (tag > 0) text = text[tag..].TrimStart();
 
         try
         {

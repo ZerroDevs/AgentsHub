@@ -159,6 +159,9 @@ interface SettingsStoreState {
   autoScroll: boolean;
 
   // Update Management
+  /** The version the running host reports. Nothing in the UI may invent one. */
+  appVersion: string;
+  setAppVersion: (version: string) => void;
   updateStatus: 'idle' | 'checking' | 'available' | 'uptodate' | 'error' | 'downloading' | 'downloaded';
   updateStatusText: string;
   updateStatusSubtext: string;
@@ -171,6 +174,8 @@ interface SettingsStoreState {
     downloadUrl?: string;
     assetSizeBytes?: number;
     publishedAtUtc?: string;
+    /** The host's one-line explanation, shown as the card's subtext. */
+    message?: string;
   } | null;
   downloadProgress: number;
   downloadProgressLabel: string;
@@ -466,9 +471,12 @@ export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
   autoScroll: true,
 
   // Updates Initial State
+  // Filled from the host's initial state; an empty value means the host has not answered yet and
+  // is shown as such, rather than borrowed from a version number that was true years ago.
+  appVersion: '',
   updateStatus: 'idle',
   updateStatusText: 'Check for updates',
-  updateStatusSubtext: 'Target: github.com/ZerroDevs/AgentsHub',
+  updateStatusSubtext: '',
   updateInfo: null,
   downloadProgress: 0,
   downloadProgressLabel: 'Downloading installer...',
@@ -916,28 +924,51 @@ export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
     } catch {}
   },
 
+  setAppVersion: (version: string) => {
+    const clean = String(version || '').trim().replace(/^v/i, '');
+    if (!clean) return;
+
+    set({ appVersion: clean });
+  },
+
+  /**
+   * Asks the host to compare its own version with the release list. The host owns the ordering
+   * (Services/AppVersion.cs) so the UI never has to parse tags, and this only renders the answer.
+   *
+   * `manual` is the difference between a click and the launch-time check: a background check that
+   * fails must leave the card alone instead of painting an error the person never asked for.
+   */
   checkForUpdates: async (manual = true) => {
-    set({
-      updateStatus: 'checking',
-      updateStatusText: 'Checking GitHub for releases...',
-      updateStatusSubtext: 'Target: github.com/ZerroDevs/AgentsHub',
-    });
+    const current = get().appVersion;
+
+    if (manual) {
+      set({
+        updateStatus: 'checking',
+        updateStatusText: 'Checking GitHub for releases...',
+        updateStatusSubtext: current ? `Current: v${current}` : 'Target: github.com/ZerroDevs/AgentsHub',
+      });
+    }
 
     try {
       const res = await webviewBridge.invoke('check_for_updates');
       if (!res) {
-        set({
-          updateStatus: 'error',
-          updateStatusText: 'Failed to check GitHub releases',
-          updateStatusSubtext: 'Check your network connection and retry',
-        });
+        if (manual) {
+          set({
+            updateStatus: 'error',
+            updateStatusText: 'Failed to check GitHub releases',
+            updateStatusSubtext: 'Check your network connection and retry',
+          });
+        }
         return null;
       }
 
       const isAvail = !!(res.isUpdateAvailable ?? res.IsUpdateAvailable);
       const latestVer = (res.latestVersion || res.LatestVersion || '').replace(/^v/i, '');
-      const currentVer = (res.currentVersion || res.CurrentVersion || '1.0.5').replace(/^v/i, '');
-      const resultKind = res.result ?? res.Result;
+      const currentVer = (res.currentVersion || res.CurrentVersion || current || '').replace(/^v/i, '');
+      const resultKind = String(res.result ?? res.Result ?? '');
+      const message = res.message || res.Message || '';
+
+      if (currentVer && currentVer !== current) set({ appVersion: currentVer });
 
       const info = {
         isUpdateAvailable: isAvail,
@@ -948,31 +979,52 @@ export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
         downloadUrl: res.downloadUrl || res.DownloadUrl,
         assetSizeBytes: res.assetSizeBytes || res.AssetSizeBytes,
         publishedAtUtc: res.publishedAtUtc || res.PublishedAtUtc,
+        message,
       };
 
       if (isAvail) {
         set({
           updateStatus: 'available',
           updateStatusText: `Update Available: v${latestVer}`,
-          updateStatusSubtext: `Current: v${currentVer} · Latest: v${latestVer}`,
+          updateStatusSubtext: message || `Current: v${currentVer} · Latest: v${latestVer}`,
           updateInfo: info,
         });
-      } else if (resultKind === 'UpToDate' || (latestVer && latestVer === currentVer) || !isAvail) {
+      } else if (resultKind === 'UpToDate') {
         set({
           updateStatus: 'uptodate',
           updateStatusText: 'Agents Hub is up to date',
-          updateStatusSubtext: `Version v${currentVer} · Checked just now`,
+          updateStatusSubtext: message || `Version v${currentVer} · Checked just now`,
           updateInfo: info,
         });
+      } else if (resultKind === 'NoReleasesFound') {
+        // Nothing to install yet is not the same as an error, but it is not "up to date" either.
+        set({
+          updateStatus: 'error',
+          updateStatusText: 'No published releases found',
+          updateStatusSubtext: message || 'github.com/ZerroDevs/AgentsHub has no release with a version tag yet.',
+          updateInfo: info,
+        });
+      } else {
+        // CheckFailed, or a reply this UI does not recognise: say so instead of claiming up to date.
+        if (manual) {
+          set({
+            updateStatus: 'error',
+            updateStatusText: 'Update check failed',
+            updateStatusSubtext: message || 'Could not read the release list.',
+          });
+        }
+        return null;
       }
 
       return info;
     } catch (err: any) {
-      set({
-        updateStatus: 'error',
-        updateStatusText: 'Update check error',
-        updateStatusSubtext: err?.message || 'Network request failed',
-      });
+      if (manual) {
+        set({
+          updateStatus: 'error',
+          updateStatusText: 'Update check error',
+          updateStatusSubtext: err?.message || 'Network request failed',
+        });
+      }
       return null;
     }
   },
@@ -1203,8 +1255,10 @@ if (typeof window !== 'undefined') {
   webviewBridge.on('update_available', (payload: any) => {
     if (payload) {
       const latestVer = (payload.latestVersion || payload.LatestVersion || '').replace(/^v/i, '');
-      const currentVer = (payload.currentVersion || payload.CurrentVersion || '1.0.5').replace(/^v/i, '');
+      const currentVer = (payload.currentVersion || payload.CurrentVersion
+        || useSettingsStore.getState().appVersion || '').replace(/^v/i, '');
       useSettingsStore.setState({
+        appVersion: currentVer || useSettingsStore.getState().appVersion,
         updateStatus: 'available',
         updateStatusText: `Update Available: v${latestVer}`,
         updateStatusSubtext: `Current: v${currentVer} · Latest: v${latestVer}`,
@@ -1215,6 +1269,7 @@ if (typeof window !== 'undefined') {
           releaseName: payload.releaseName || payload.ReleaseName || `Release v${latestVer}`,
           releaseNotes: payload.releaseNotes || payload.ReleaseNotes || '',
           downloadUrl: payload.downloadUrl || payload.DownloadUrl,
+          message: payload.message || payload.Message || '',
         },
       });
     }

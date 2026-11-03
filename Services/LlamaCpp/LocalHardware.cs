@@ -10,11 +10,21 @@ public sealed record MemoryBudget(long VramMb, long RamMb)
     /// A rough fit for one model file. Weights are not the whole story — context and the runtime
     /// take their own share — so the estimate pads the file size instead of pretending to be exact.
     /// </summary>
-    public (string Where, long NeedMb, long HaveMb) Fit(long fileBytes)
-    {
-        long needMb = (long)(fileBytes / 1048576.0 * 1.15);
+    public (string Where, long NeedMb, long HaveMb) Fit(long fileBytes) => Fit(fileBytes, 0, 0);
 
-        if (VramMb > 0 && needMb <= (long)(VramMb * 0.92))
+    /// <summary>
+    /// The same verdict with the KV cache counted.
+    ///
+    /// At the context this app defaults to, the cache can outgrow the weights: a 2B model at 262k
+    /// context costs more in cache than in parameters, and a badge that ignores that promises a load
+    /// the card cannot finish.
+    /// </summary>
+    public (string Where, long NeedMb, long HaveMb) Fit(long fileBytes, int contextSize, double kvBytesPerToken, bool gpuUsable = true)
+    {
+        long needMb = NeedMb(fileBytes, contextSize, kvBytesPerToken);
+
+        // A CPU-only llama.cpp cannot use the card at all, so "fits GPU" is not a promise it can keep.
+        if (gpuUsable && VramMb > 0 && needMb <= (long)(VramMb * 0.92))
         {
             return ("gpu", needMb, VramMb);
         }
@@ -25,6 +35,43 @@ public sealed record MemoryBudget(long VramMb, long RamMb)
         }
 
         return ("slow", needMb, Math.Max(VramMb, RamMb));
+    }
+
+    /// <summary>Weights at their padded estimate plus the cache one context costs, in megabytes.</summary>
+    public static long NeedMb(long fileBytes, int contextSize, double kvBytesPerToken)
+    {
+        long weights = (long)(fileBytes / 1048576.0 * 1.15);
+        long cache = kvBytesPerToken > 0 && contextSize > 0
+            ? (long)(kvBytesPerToken * contextSize / 1048576.0)
+            : 0;
+
+        return weights + cache;
+    }
+
+    /// <summary>
+    /// The largest context that still fits, chosen from the sizes llama.cpp is usually launched with.
+    /// Zero means the weights alone already fail, so there is nothing to suggest.
+    /// </summary>
+    public int SuggestContext(long fileBytes, double kvBytesPerToken, int cap, bool gpuUsable = true)
+    {
+        if (kvBytesPerToken <= 0) return 0;
+
+        int[] steps = [4096, 8192, 16384, 32768, 49152, 65536, 131072, 262144];
+        int best = 0;
+
+        foreach (int step in steps)
+        {
+            if (cap > 0 && step > cap) break;
+
+            long need = NeedMb(fileBytes, step, kvBytesPerToken);
+            bool fits = (gpuUsable && VramMb > 0 && need <= (long)(VramMb * 0.92))
+                || (RamMb > 0 && need <= (long)(RamMb * 0.85));
+
+            if (!fits) break;
+            best = step;
+        }
+
+        return best;
     }
 }
 

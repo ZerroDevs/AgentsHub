@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, Brain, ChevronDown, ChevronRight, Cpu, File, FileCode, FileText, Filter, Folder, FolderOpen, GitBranch, KeyRound, Loader2, Plus, Settings, SquareTerminal, Terminal, Trash2, Zap } from 'lucide-react';
+import { Sparkles, Brain, ChevronDown, ChevronRight, Cpu, File, FileCode, FileCode2, FileText, Filter, Folder, FolderOpen, GitBranch, KeyRound, Loader2, Plus, Settings, SquareTerminal, Terminal, Trash2, Zap } from 'lucide-react';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useSessionStore } from '../../store/useSessionStore';
 import { useProfileStore } from '../../store/useProfileStore';
@@ -9,6 +9,7 @@ import { webviewBridge } from '../../services/webviewBridge';
 import { engineIcons } from '../../lib/toolIcons';
 import { BYOK_PROVIDER_CHANGED } from '../chat/ByokProviderSwitcher';
 import { BackendSessionItem, WorkspaceFileItem } from '../../types/agent';
+import { FileViewerModal } from '../modals/FileViewerModal';
 
 interface SecondarySidebarProps {
   onOpenWorkspaceModal: () => void;
@@ -50,6 +51,8 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
   const [isFilesOpen, setIsFilesOpen] = useState(
     () => localStorage.getItem('agentshub_sidebar_files_open') !== 'false'
   );
+  /** The file opened in the viewer, or null. Kept here because the list owns the click. */
+  const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [showNoisyFiles, setShowNoisyFiles] = useState(
     () => localStorage.getItem('agentshub_sidebar_files_all') === 'true'
   );
@@ -671,6 +674,21 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
                 <span className={`truncate ${file.isDirectory ? 'font-medium text-content-main' : ''}`}>
                   {file.name}
                 </span>
+                {!file.isDirectory && (
+                  <button
+                    type="button"
+                    // Its own click target: the row inserts the path into the prompt, this opens it.
+                    onClick={event => {
+                      event.stopPropagation();
+                      setPreviewFile(file.path);
+                    }}
+                    className="ml-auto shrink-0 rounded p-0.5 text-content-dim transition-colors hover:bg-sky-500/10 hover:text-sky-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500"
+                    title={`Open ${file.path}`}
+                    aria-label={`Open ${file.path}`}
+                  >
+                    <FileCode2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
             ))
           )}
@@ -806,6 +824,8 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({ onOpenWorksp
             document.body
           )
         : null}
+
+      <FileViewerModal path={previewFile} onClose={() => setPreviewFile(null)} />
     </aside>
   );
 };
