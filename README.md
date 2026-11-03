@@ -7,7 +7,7 @@ Agents Hub coordinates coding agents across your machine in a single desktop app
 [![Version: v0.0.120](https://img.shields.io/badge/Version-v0.0.120-2563eb?style=flat-square)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
 [![GitHub Release](https://img.shields.io/github/v/release/ZerroDevs/AgentsHub?style=flat-square&color=2563eb&label=Release)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
 [![Download Setup](https://img.shields.io/badge/Download-Windows%20Installer%20(.exe)-10b981?style=flat-square&logo=windows)](https://github.com/ZerroDevs/AgentsHub/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-3fb950?style=flat-square)](LICENSE)
+[![License: CopyLeft](https://img.shields.io/badge/License-MIT-3fb950?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20x64-0078D6?style=flat-square)]()
 [![Security Policy](https://img.shields.io/badge/Security-Policy-blue?style=flat-square)](SECURITY.md)
 
