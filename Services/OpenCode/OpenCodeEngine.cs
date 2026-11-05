@@ -73,7 +73,7 @@ internal sealed class OpenCodeEngine : IDisposable
     private static readonly Regex CodeLine = new(@"Enter code:\s*([A-Za-z0-9][A-Za-z0-9-]{3,15})", RegexOptions.Compiled);
     private static readonly Regex UrlLine = new(@"(https://\S+)", RegexOptions.Compiled);
 
-    private readonly object _loginLock = new();
+    private readonly System.Threading.Lock _loginLock = new();
 
     private Process? _process;
     private Process? _loginProcess;

@@ -27,7 +27,7 @@ internal sealed class McpSession : IDisposable
     private readonly Process _process;
     private readonly StreamWriter _stdin;
     private readonly StreamReader _stdout;
-    private readonly object _gate = new();
+    private readonly System.Threading.Lock _gate = new();
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonNode?>> _pending = new();
     private readonly StringBuilder _stderrTail = new();
     private int _nextId;
@@ -310,7 +310,7 @@ internal static class McpRegistry
         Sessions[config.Name] = fresh;
         return fresh;
     }
-    private static readonly object Gate = new();
+    private static readonly System.Threading.Lock Gate = new();
     private static IReadOnlyList<McpToolInfo>? _cachedTools;
     private static IReadOnlyList<McpServerConfig>? _cachedConfigs;
 

@@ -220,6 +220,86 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
       alive = false;
     };
   }, [isZai]);
+
+  /**
+   * Sign-in state for the Antigravity engines, probed as soon as a session opens.
+   *
+   * Without the probe the composer had nothing to say until a prompt was sent, so an unsigned
+   * profile looked ready and the browser opened with no explanation.
+   */
+  const [antigravitySignIn, setAntigravitySignIn] = useState<{
+    signedIn: boolean | null;
+    profile: string;
+    url: string | null;
+  } | null>(null);
+
+  const sessionProfile = activeSession?.profile || activeProfileName;
+  const probesAntigravity = !isHostEngine;
+
+  useEffect(() => {
+    if (!probesAntigravity) {
+      setAntigravitySignIn(null);
+      return;
+    }
+
+    let alive = true;
+    void webviewBridge
+      .invoke('antigravity_auth_state', { profile: sessionProfile })
+      .then((res: any) => {
+        if (!alive) return;
+        setAntigravitySignIn({
+          signedIn: Boolean(res?.signedIn),
+          profile: String(res?.profile || sessionProfile || ''),
+          url: typeof res?.url === 'string' && res.url ? res.url : null,
+        });
+      })
+      .catch(() => {
+        if (alive) setAntigravitySignIn(null);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [probesAntigravity, sessionProfile, activeSession?.id]);
+
+  const startAntigravitySignIn = async () => {
+    try {
+      const res: any = await webviewBridge.invoke('antigravity_signin', { profile: sessionProfile });
+      setAntigravitySignIn({
+        signedIn: Boolean(res?.signedIn),
+        profile: String(res?.profile || sessionProfile || ''),
+        url: typeof res?.url === 'string' && res.url ? res.url : null,
+      });
+      if (typeof res?.url === 'string' && res.url) {
+        void webviewBridge.invoke('open_external', { url: res.url }).catch(() => {});
+      }
+    } catch {
+      // The host explains its own failures in the transcript; the block stays put for a retry.
+    }
+  };
+
+  const submitAntigravityCode = async (code: string) => {
+    // The prompt abandons the flow about a minute in, so the answer can take longer than a normal
+    // request and the bridge's default timeout would fire first.
+    const res: any = await webviewBridge.invoke(
+      'antigravity_submit_code',
+      { profile: sessionProfile, code },
+      60000
+    );
+
+    setAntigravitySignIn({
+      signedIn: Boolean(res?.signedIn),
+      profile: String(res?.profile || sessionProfile || ''),
+      url: typeof res?.url === 'string' && res.url ? res.url : null,
+    });
+
+    if (typeof res?.url === 'string' && res.url) {
+      void webviewBridge.invoke('open_external', { url: res.url }).catch(() => {});
+    }
+
+    return { signedIn: Boolean(res?.signedIn), error: res?.error ?? null };
+  };
+
   const isOpenCode = activeSession?.engine === 'opencode';
 
   /** A turn from a host engine never starts a runner, so gating one on the runner is wrong. */
@@ -906,6 +986,12 @@ export const AgentChatView: React.FC<AgentChatViewProps> = ({ onOpenGitModal }) 
               turnCount={activeSession?.messages.filter(message => message.sender === 'assistant').length}
               onOpenGitModal={onOpenGitModal}
               engine={activeSession.engine}
+              antigravitySignIn={antigravitySignIn}
+              onAntigravitySignIn={() => void startAntigravitySignIn()}
+              onOpenAntigravitySignInPage={url => {
+                void webviewBridge.invoke('open_external', { url }).catch(() => {});
+              }}
+              onAntigravitySubmitCode={submitAntigravityCode}
               deepSeekSignedIn={deepSeekSignedIn}
               onDeepSeekLogin={openDeepSeekLogin}
               deepThink={activeSession.deepThink}

@@ -118,7 +118,7 @@ public sealed class LlamaCppService
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AgentsHub", "llama_settings.json");
 
-    private readonly object _lock = new();
+    private readonly System.Threading.Lock _lock = new();
     private Process? _server;
     private string _message = "Not started.";
 
@@ -131,7 +131,7 @@ public sealed class LlamaCppService
 
     // ---- idle unload ----
 
-    private readonly object _idleLock = new();
+    private readonly System.Threading.Lock _idleLock = new();
     private DateTime _lastActivityUtc = DateTime.UtcNow;
     private int _activeRequests;
     // Named in full: the desktop build also sees System.Windows.Forms.Timer, which is a different clock.

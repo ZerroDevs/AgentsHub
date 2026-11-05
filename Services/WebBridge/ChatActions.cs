@@ -510,6 +510,89 @@ public sealed partial class DashboardWebBridge : IDisposable
         }
 #endif
 
+        // Antigravity signs in with a code that only a terminal prompt accepts. A headless turn
+        // runs agy with stdin ignored, so an unsigned profile used to stall on that prompt and
+        // finish with an empty reply. Ask for the code here instead.
+        string? chatEngine = data.TryGetProperty("engine", out var chatEngineElem) ? chatEngineElem.GetString() : null;
+        bool isAntigravityChat = string.IsNullOrWhiteSpace(chatEngine)
+            || string.Equals(chatEngine, "antigravity", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(chatEngine, "agy", StringComparison.OrdinalIgnoreCase);
+
+        if (isAntigravityChat)
+        {
+            var login = AntigravityLoginService.Instance;
+            bool waitingForThisProfile = login.IsWaiting
+                && string.Equals(login.Profile, profile, StringComparison.OrdinalIgnoreCase);
+
+            if (waitingForThisProfile && LooksLikeAntigravityAuthCode(prompt))
+            {
+                PostEventToUi("chat_token", new
+                {
+                    sessionId,
+                    text = "Checking that code with Google.\n",
+                    timestamp = DateTime.UtcNow.ToString("O"),
+                });
+
+                SendResponse(requestId, true, new { sent = true, sessionId });
+
+                _ = Task.Run(async () =>
+                {
+                    var (signedIn, reason) = await login.SubmitCodeAsync(prompt).ConfigureAwait(false);
+
+                    PostEventToUi("chat_token", new
+                    {
+                        sessionId,
+                        text = signedIn
+                            ? $"Signed in to Antigravity for {profile}. Send your message again.\n"
+                            : $"That code did not complete the sign-in: {reason}. Send a message to start a new sign-in.\n",
+                        timestamp = DateTime.UtcNow.ToString("O"),
+                    });
+
+                    PostEventToUi("session_status", new
+                    {
+                        sessionId,
+                        state = "idle",
+                        timestamp = DateTime.UtcNow.ToString("O"),
+                    });
+                });
+
+                return;
+            }
+
+            if (!AntigravityLoginService.IsSignedIn(profile))
+            {
+                SendResponse(requestId, true, new { sent = true, sessionId });
+
+                _ = Task.Run(async () =>
+                {
+                    // A login already waiting for this profile keeps its own URL; otherwise a new
+                    // one is started, which also replaces a stale process for another profile.
+                    string? url = waitingForThisProfile ? login.AuthUrl : null;
+                    if (string.IsNullOrWhiteSpace(url))
+                    {
+                        url = await login.StartAsync(profile, _cliManager.ProfileService).ConfigureAwait(false);
+                    }
+
+                    PostEventToUi("chat_token", new
+                    {
+                        sessionId,
+                        text = BuildAntigravitySignInText(profile, url),
+                        timestamp = DateTime.UtcNow.ToString("O"),
+                    });
+
+                    // The composer stays usable: the next message is either the code or a retry.
+                    PostEventToUi("session_status", new
+                    {
+                        sessionId,
+                        state = "idle",
+                        timestamp = DateTime.UtcNow.ToString("O"),
+                    });
+                });
+
+                return;
+            }
+        }
+
         // The CLI engines (Claude Code, Antigravity, the sidecar itself) take a prompt and nothing
         // else, so the attachments travel as the paths they were written to. A CLI opens a file with
         // its own tools, which is why a note is enough there — and why dropping them was not.
@@ -518,6 +601,142 @@ public sealed partial class DashboardWebBridge : IDisposable
 
         await Sidecar.SidecarHostService.Instance.SendChatAsync(sessionId, cliPrompt, model, profile, cwd, effort, skipPermissions, conversationId).ConfigureAwait(false);
         SendResponse(requestId, true, new { sent = true, sessionId });
+    }
+
+    /// <summary>
+    /// Sign-in state for the composer, so an unsigned profile says so before a prompt is sent.
+    /// </summary>
+    private Task HandleAntigravityAuthStateAsync(JsonElement data, string? requestId)
+    {
+        string profile = ResolveAntigravityProfile(data);
+        var login = AntigravityLoginService.Instance;
+        bool waiting = login.IsWaiting && string.Equals(login.Profile, profile, StringComparison.OrdinalIgnoreCase);
+
+        SendResponse(requestId, true, new
+        {
+            signedIn = AntigravityLoginService.IsSignedIn(profile),
+            profile,
+            url = waiting ? login.AuthUrl : null,
+            waiting,
+        });
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Starts the sign-in prompt and hands its URL back for the composer.</summary>
+    private async Task HandleAntigravitySignInAsync(JsonElement data, string? requestId)
+    {
+        string profile = ResolveAntigravityProfile(data);
+
+        if (AntigravityLoginService.IsSignedIn(profile))
+        {
+            SendResponse(requestId, true, new { signedIn = true, profile, url = (string?)null });
+            return;
+        }
+
+        string? url = await AntigravityLoginService.Instance
+            .StartAsync(profile, _cliManager.ProfileService)
+            .ConfigureAwait(false);
+
+        SendResponse(requestId, true, new
+        {
+            signedIn = false,
+            profile,
+            url,
+            error = url is null ? "The Antigravity sign-in prompt could not be started." : null,
+        });
+    }
+
+    /// <summary>
+    /// Takes the code copied out of the Google page and writes it into the waiting prompt.
+    ///
+    /// The composer's own box lands here so a code is never mistaken for a chat message: the turn
+    /// path has to shape-match the text, and a code pasted into the wrong place used to become an
+    /// ordinary prompt for the model.
+    /// </summary>
+    private async Task HandleAntigravitySubmitCodeAsync(JsonElement data, string? requestId)
+    {
+        string profile = ResolveAntigravityProfile(data);
+        string code = data.TryGetProperty("code", out var codeElem) ? (codeElem.GetString() ?? string.Empty).Trim() : string.Empty;
+
+        if (code.Length == 0)
+        {
+            SendResponse(requestId, true, new { signedIn = false, profile, error = "Paste the code the page showed first." });
+            return;
+        }
+
+        var login = AntigravityLoginService.Instance;
+        bool waiting = login.IsWaiting && string.Equals(login.Profile, profile, StringComparison.OrdinalIgnoreCase);
+
+        if (!waiting)
+        {
+            // The code is bound to the process that printed its link, so a late paste cannot land.
+            // Starting a fresh prompt is the one thing that can still work, and it is one click.
+            string? url = await login.StartAsync(profile, _cliManager.ProfileService).ConfigureAwait(false);
+
+            SendResponse(requestId, true, new
+            {
+                signedIn = false,
+                profile,
+                url,
+                error = url is null
+                    ? "The sign-in prompt could not be started. Try again in a moment."
+                    : "That code was too late: the sign-in had expired. Finish the fresh sign-in link, then paste the new code.",
+            });
+            return;
+        }
+
+        var (signedIn, reason) = await login.SubmitCodeAsync(code).ConfigureAwait(false);
+
+        SendResponse(requestId, true, new
+        {
+            signedIn,
+            profile,
+            url = (string?)null,
+            error = signedIn ? null : $"That code did not complete the sign-in: {reason}.",
+        });
+    }
+
+    /// <summary>The profile a chat or sign-in belongs to, resolved the same way a turn resolves it.</summary>
+    private string ResolveAntigravityProfile(JsonElement data)
+    {
+        string profile = data.TryGetProperty("profile", out var profileElem) ? profileElem.GetString() ?? string.Empty : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(profile) || string.Equals(profile, "default", StringComparison.OrdinalIgnoreCase))
+        {
+            profile = _cliManager.ProfileService.ActiveProfile ?? "default";
+        }
+
+        return profile;
+    }
+
+    /// <summary>
+    /// A Google authorization code is the only thing a user copies out of the sign-in page. The
+    /// shape check keeps ordinary chat out of the login path.
+    /// </summary>
+    private static bool LooksLikeAntigravityAuthCode(string text)
+    {
+        string trimmed = text.Trim();
+        if (trimmed.Length is < 24 or > 4096 || trimmed.Contains(' ')) return false;
+
+        return trimmed.StartsWith("4/", StringComparison.Ordinal)
+            || trimmed.StartsWith("4%2F", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Sign-in instructions for the chat, with the URL agy itself generated.</summary>
+    private static string BuildAntigravitySignInText(string profile, string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return $"Antigravity is not signed in for {profile}, and the sign-in prompt could not be started. "
+                + "Open an Antigravity tab and sign in there once, then send this message again.\n";
+        }
+
+        return $"Antigravity is not signed in for {profile}, so your message was not sent.\n\n"
+            + $"1. [Open the Google sign-in page]({url})\n"
+            + "2. Finish the sign-in. The browser then shows a long code.\n"
+            + "3. Paste that code into this chat and send it.\n\n"
+            + "The code works for about a minute after the page opens. If it expires, send any message for a fresh link.\n";
     }
 
     private async Task HandleGetModelCatalogAsync(JsonElement data, string? requestId)

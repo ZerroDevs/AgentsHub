@@ -612,6 +612,18 @@ public sealed partial class DashboardWebBridge : IDisposable
                 await HandleSendChatAsync(data, requestId).ConfigureAwait(false);
                 break;
 
+            case "antigravity_auth_state":
+                await HandleAntigravityAuthStateAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "antigravity_signin":
+                await HandleAntigravitySignInAsync(data, requestId).ConfigureAwait(false);
+                break;
+
+            case "antigravity_submit_code":
+                await HandleAntigravitySubmitCodeAsync(data, requestId).ConfigureAwait(false);
+                break;
+
 #if DEEPSEEK_UI
 #if WINDOWS
             case "qwen_status":

@@ -21,7 +21,7 @@ internal static class DeepSeekAccounts
 
     private static readonly string RegistryPath = Path.Combine(Root, "deepseek-accounts.json");
 
-    private static readonly object Gate = new();
+    private static readonly System.Threading.Lock Gate = new();
     private static List<DeepSeekAccount>? _accounts;
     private static string _active = "default";
 

@@ -5,6 +5,59 @@ without re-deriving anything.
 
 ---
 
+## 0. 05 Nov 2026: Antigravity sign-in from chat
+
+**Done this turn.** A chat turn for an unsigned Antigravity profile used to run `agy` headless with
+stdin ignored: the CLI printed its OAuth URL, waited for a code nobody could type, and exited with
+no reply. Now:
+
+- `Services/AntigravityLoginService.cs` (new) starts `agy` in a pseudo-console with its output
+  redirected to `VirtualHome\.gemini\antigravity-login.out`. Stdin stays a terminal, which is the
+  only stdin that prompt reads; the file is what makes the prompt visible, because the console
+  pipe never receives it (measured with `cmd /c echo`).
+- `Services/WebBridge/ChatActions.cs` checks sign-in before dispatch for the agy engine only. Not
+  signed in: the turn is not sent, and the chat gets the URL plus three steps. A message shaped
+  like a Google code (`4/...` or `4%2F...`) while that login is waiting is written into the
+  prompt instead of being sent to the model.
+
+**Verified.** `dotnet build` clean on `net10.0-windows` and `net10.0`. The real service class,
+run against a throwaway profile, reported `signedInBefore=False`, extracted the Google URL, and
+answered a bogus code with `token exchange failed` after agy logged `submitting manually-entered
+auth code`. A real Google sign-in was not completed here: that needs a human at the consent screen.
+
+**Open.** A code pasted after agy's 60 second window cannot be reused; the chat asks for a new
+link. Expired tokens still look signed in (presence check, not expiry check), so that case falls
+back to the old silent wait.
+
+### 0b. 06 Nov 2026: IDE0330 cleared
+
+Eight `private readonly object` fields exist only to be locked, so the analyzer asked for
+`System.Threading.Lock`. Changed the field type in `AntigravityLoginService`, `DeepSeekAccounts`,
+`McpClient` (two), `LlamaCppService` (two), `LocalHardware` and `OpenCodeEngine`. The `lock` blocks
+are untouched. Build warnings went 39 to 31 on `net10.0-windows`, 0 errors on both targets.
+
+### 0a. 06 Nov 2026: the sign-in notice now appears before a prompt is sent
+
+The first cut only reacted to `send_chat`, so an unsigned profile looked ready: nothing in the
+session said a word until a prompt was sent, and the browser opened with no explanation.
+
+- `ui/src/views/AgentChatView.tsx` probes `antigravity_auth_state` as soon as a session opens (and
+  when the session or profile changes), and feeds `antigravitySignIn` to the composer.
+- `ui/src/components/chat/ChatInput.tsx` renders the sign-in block above the composer with the
+  three steps, a **Sign in** button, and its own paste box plus **Submit code**. The block used to
+  require `engine === 'agy'`, but an ordinary session sends no engine at all, so it never matched;
+  an unset engine is agy and now counts.
+- `Services/WebBridge/ChatActions.cs`: new `antigravity_submit_code` action. A pasted code from the
+  composer's box goes straight into the waiting prompt instead of being shape-matched on its way
+  through the turn path; a code whose sign-in has expired starts a fresh link and says so.
+  `antigravity_auth_state` also reports `waiting`.
+
+**Verified.** `dotnet build` clean on `net10.0-windows` (0 errors), `ui` typecheck clean, `ui`
+`npm run build` produced `ui/dist`. A completed Google sign-in still needs a human at the consent
+screen; that end of the flow is unverified here.
+
+---
+
 ## 1. Where things stand
 
 Three engines answer in the chat: the Antigravity CLI, DeepSeek and Qwen (both through WebView2),

@@ -50,6 +50,17 @@ interface ChatInputProps {
   deepSeekSignedIn?: boolean | null;
   /** Opens the one-time DeepSeek sign-in window. */
   onDeepSeekLogin?: () => void;
+  /** Antigravity sign-in state, null while the host has not answered yet. */
+  antigravitySignIn?: { signedIn: boolean | null; profile: string; url: string | null } | null;
+  /** Starts the Antigravity sign-in prompt and reports its URL. */
+  onAntigravitySignIn?: () => void;
+  /** Opens the URL the prompt printed, in the system browser. */
+  onOpenAntigravitySignInPage?: (url: string) => void;
+  /**
+   * Hands a pasted authorization code to the waiting prompt. Resolves with what the host made of
+   * it, so the box can say "expired, finish the new link" instead of swallowing the paste.
+   */
+  onAntigravitySubmitCode?: (code: string) => Promise<{ signedIn: boolean; error?: string | null }>;
   /** DeepSeek's DeepThink chip; undefined means its default, which is on. */
   deepThink?: boolean;
   /** DeepSeek's Search chip; undefined means its default, which is off. */
@@ -96,6 +107,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   engine,
   deepSeekSignedIn,
   onDeepSeekLogin,
+  antigravitySignIn,
+  onAntigravitySignIn,
+  onOpenAntigravitySignInPage,
+  onAntigravitySubmitCode,
   deepThink,
   webSearch,
   onDeepSeekOption,
@@ -675,6 +690,37 @@ export const ChatInput: React.FC<ChatInputProps> = ({
    * slow or never answers used to leave the composer with no sign-in affordance at all.
    */
   const needsDeepSeekLogin = isDeepSeek && deepSeekSignedIn !== true;
+  /**
+   * Antigravity only shows the block once the host has confirmed there is no token. An unset engine
+   * is agy: that is the default the dispatcher sends, so `engine === 'agy'` alone missed every
+   * ordinary session and the sign-in block never appeared where it was needed.
+   */
+  const needsAntigravitySignIn =
+    (engine === 'agy' || engine === undefined) && antigravitySignIn?.signedIn === false;
+  /** The pasted code, kept out of the prompt so it cannot be submitted as a chat message. */
+  const [authCode, setAuthCode] = useState('');
+  const [authCodeError, setAuthCodeError] = useState<string | null>(null);
+  const [authCodeBusy, setAuthCodeBusy] = useState(false);
+
+  const submitAuthCode = async () => {
+    const code = authCode.trim();
+    if (!code || !onAntigravitySubmitCode || authCodeBusy) return;
+
+    setAuthCodeBusy(true);
+    setAuthCodeError(null);
+    try {
+      const result = await onAntigravitySubmitCode(code);
+      if (result.signedIn) {
+        setAuthCode('');
+      } else {
+        setAuthCodeError(result.error || 'That code was not accepted.');
+      }
+    } catch (err) {
+      setAuthCodeError(err instanceof Error ? err.message : 'The code could not be checked.');
+    } finally {
+      setAuthCodeBusy(false);
+    }
+  };
 
   return (
     <div
@@ -929,7 +975,84 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         )}
 
-        {needsDeepSeekLogin ? (
+        {needsAntigravitySignIn ? (
+          <div
+            className="mb-2 w-full rounded-lg border border-sky-500/30 bg-sky-500/10 px-3.5 py-2.5 text-[11px]"
+            role="status"
+          >
+            <div className="flex items-center gap-2">
+              <KeyRound className="h-3.5 w-3.5 flex-shrink-0 text-accent" aria-hidden="true" />
+              <span className="flex-1 text-content-main">
+                Antigravity is not signed in for{' '}
+                <span className="font-mono">{antigravitySignIn?.profile}</span>.
+              </span>
+              {onAntigravitySignIn ? (
+                <button
+                  type="button"
+                  onClick={onAntigravitySignIn}
+                  className="flex-shrink-0 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] text-accent transition-colors hover:bg-sky-500/20"
+                >
+                  {antigravitySignIn?.url ? 'Restart sign-in' : 'Sign in'}
+                </button>
+              ) : null}
+            </div>
+            <ol className="mt-1.5 list-decimal space-y-0.5 pl-4 font-mono text-[10.5px] leading-relaxed text-content-muted">
+              <li>Press Sign in, then finish the Google prompt in the browser it opens.</li>
+              <li>Copy the long code that page shows.</li>
+              <li>Paste the code into this box and send it. That is the whole step.</li>
+            </ol>
+            {antigravitySignIn?.url ? (
+              <button
+                type="button"
+                onClick={() => onOpenAntigravitySignInPage?.(antigravitySignIn.url as string)}
+                className="mt-1.5 font-mono text-[10px] text-accent underline underline-offset-2 transition-colors hover:text-content-main"
+              >
+                Open the sign-in page
+              </button>
+            ) : null}
+
+            {/* The code goes here, not through the prompt box: the turn path has to shape-match a
+                pasted code, and a near miss used to reach the model as an ordinary message. */}
+            {onAntigravitySubmitCode ? (
+              <div className="mt-2 flex flex-col gap-1.5">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={authCode}
+                    onChange={event => {
+                      setAuthCode(event.target.value);
+                      setAuthCodeError(null);
+                    }}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void submitAuthCode();
+                      }
+                    }}
+                    placeholder="Paste the authorization code here"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label="Antigravity authorization code"
+                    className="min-w-0 flex-1 rounded border border-surface-border bg-surface-card px-2 py-1 font-mono text-[10.5px] text-content-main placeholder:text-content-dim focus:border-sky-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void submitAuthCode()}
+                    disabled={!authCode.trim() || authCodeBusy}
+                    className="flex-shrink-0 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1 font-mono text-[10px] text-accent transition-colors hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {authCodeBusy ? 'Checking…' : 'Submit code'}
+                  </button>
+                </div>
+                {authCodeError ? (
+                  <p className="font-mono text-[10px] leading-relaxed text-state-warning" role="alert">
+                    {authCodeError}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : needsDeepSeekLogin ? (
           <div
             className="flex items-center gap-2 border-b border-sky-500/25 bg-sky-500/10 px-3.5 py-1.5 text-[11px] text-content-muted"
             role="status"

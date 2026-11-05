@@ -81,7 +81,7 @@ public sealed record MemoryBudget(long VramMb, long RamMb)
 /// </summary>
 public static class LocalHardware
 {
-    private static readonly object Gate = new();
+    private static readonly System.Threading.Lock Gate = new();
     private static MemoryBudget _cached = new(0, 0);
     private static DateTime _cachedAt = DateTime.MinValue;
 
