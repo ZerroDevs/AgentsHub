@@ -59,10 +59,15 @@ Name: "startupicon"; Description: "Launch Agents Hub minimized to system tray on
 
 [Files]
 ; الملف التنفيذي وكافة مخرجات الـ publish (DLLs وأي ملفات runtime مصاحبة)
-Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "Profiles\*,ui\node_modules\*,*\ui\node_modules\*,ui\src\*,*\ui\src\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "Profiles\*,bin\linux*\*,bin\osx*\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; ملفات الواجهة الأمامية لمجلد UI بالكامل (HTML / CSS / JS / xterm)
-Source: "ui\*"; DestDir: "{app}\ui"; Excludes: "node_modules\*,*\node_modules\*,node_modules,*\node_modules,src\*,*\src\*,src,*\src,*.ts,*.json,*.mjs,*.lock,postcss.config.js,tailwind.config.js"; Flags: ignoreversion recursesubdirs createallsubdirs
+; ملفات الواجهة الأمامية لمجلد UI (HTML / CSS / JS / xterm)
+Source: "ui\dist\*"; DestDir: "{app}\ui\dist"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "ui\terminal.html"; DestDir: "{app}\ui"; Flags: ignoreversion
+Source: "ui\hub-offline.html"; DestDir: "{app}\ui"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "ui\css\*"; DestDir: "{app}\ui\css"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "ui\js\*"; DestDir: "{app}\ui\js"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "ui\*.png"; DestDir: "{app}\ui"; Flags: ignoreversion
 
 ; مجلد الأصول الثابتة
 Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs

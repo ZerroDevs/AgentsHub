@@ -143,9 +143,17 @@
     <None Update="assets\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Update="ui\**">
+    <None Update="ui\**" CopyToOutputDirectory="Never" />
+    <Content Include="ui\terminal.html;ui\hub-offline.html;ui\*.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
+    <Content Include="ui\css\**;ui\js\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Visible>false</Visible>
+    </Content>
     <Content Include="ui\dist\**" Condition="Exists('ui\dist')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
@@ -154,17 +162,17 @@
     <None Update="scripts\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <Content Include="bin\win-x64\AgentsEngine.exe" Condition="Exists('bin\win-x64\AgentsEngine.exe')">
+    <Content Include="bin\win-x64\AgentsEngine.exe" Condition="Exists('bin\win-x64\AgentsEngine.exe') and ('$(RuntimeIdentifier)' == 'win-x64' or '$(RuntimeIdentifier)' == '')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Visible>false</Visible>
     </Content>
-    <Content Include="bin\osx-arm64\AgentsEngine" Condition="Exists('bin\osx-arm64\AgentsEngine')">
+    <Content Include="bin\osx-arm64\AgentsEngine" Condition="Exists('bin\osx-arm64\AgentsEngine') and '$(RuntimeIdentifier)' == 'osx-arm64'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Visible>false</Visible>
     </Content>
-    <Content Include="bin\linux-x64\AgentsEngine" Condition="Exists('bin\linux-x64\AgentsEngine')">
+    <Content Include="bin\linux-x64\AgentsEngine" Condition="Exists('bin\linux-x64\AgentsEngine') and '$(RuntimeIdentifier)' == 'linux-x64'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <Visible>false</Visible>
@@ -189,9 +197,9 @@
 
   <!-- Ensure precompiled cross-platform sidecar binaries are always included in publish packages -->
   <Target Name="CopySidecarToPublish" AfterTargets="Publish">
-    <Copy SourceFiles="bin\win-x64\AgentsEngine.exe" DestinationFolder="$(PublishDir)bin\win-x64" Condition="Exists('bin\win-x64\AgentsEngine.exe')" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="bin\osx-arm64\AgentsEngine" DestinationFolder="$(PublishDir)bin\osx-arm64" Condition="Exists('bin\osx-arm64\AgentsEngine')" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="bin\linux-x64\AgentsEngine" DestinationFolder="$(PublishDir)bin\linux-x64" Condition="Exists('bin\linux-x64\AgentsEngine')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="bin\win-x64\AgentsEngine.exe" DestinationFolder="$(PublishDir)bin\win-x64" Condition="Exists('bin\win-x64\AgentsEngine.exe') and ('$(RuntimeIdentifier)' == 'win-x64' or '$(RuntimeIdentifier)' == '')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="bin\osx-arm64\AgentsEngine" DestinationFolder="$(PublishDir)bin\osx-arm64" Condition="Exists('bin\osx-arm64\AgentsEngine') and '$(RuntimeIdentifier)' == 'osx-arm64'" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="bin\linux-x64\AgentsEngine" DestinationFolder="$(PublishDir)bin\linux-x64" Condition="Exists('bin\linux-x64\AgentsEngine') and '$(RuntimeIdentifier)' == 'linux-x64'" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

@@ -115,12 +115,16 @@ foreach ($target in $Targets) {
             Remove-Item (Join-Path $publishDir "Profiles") -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item (Join-Path $publishDir "ui\node_modules") -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item (Join-Path $publishDir "ui\src") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $publishDir "bin\linux*") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $publishDir "bin\osx*") -Recurse -Force -ErrorAction SilentlyContinue
 
             # Copy to staging for zip packaging
             Copy-Item "$publishDir\*" $stagingDir -Recurse -Force
             Remove-Item (Join-Path $stagingDir "Profiles") -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item (Join-Path $stagingDir "ui\node_modules") -Recurse -Force -ErrorAction SilentlyContinue
             Remove-Item (Join-Path $stagingDir "ui\src") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $stagingDir "bin\linux*") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $stagingDir "bin\osx*") -Recurse -Force -ErrorAction SilentlyContinue
 
             # 2. Package Portable Zip
             $zipPath = Join-Path $OutputDir "AgentsHub-v$Version-win-x64.zip"

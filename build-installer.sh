@@ -63,7 +63,8 @@ for target in "${TARGETS[@]}"; do
     case "$target" in
         linux-x64)
             dotnet publish AgentsHub.csproj -f net10.0 -c Release -r linux-x64 --self-contained -o "$STAGE_DIR"
-            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src"
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/osx"*
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/osx"*
             cp LICENSE README.md "$STAGE_DIR/" 2>/dev/null || true
             TAR_PATH="$OUTPUT_DIR/AgentsHub-v$VERSION-linux-x64.tar.gz"
             tar -czf "$TAR_PATH" -C "$STAGE_DIR" .
@@ -71,7 +72,8 @@ for target in "${TARGETS[@]}"; do
             ;;
         linux-arm64)
             dotnet publish AgentsHub.csproj -f net10.0 -c Release -r linux-arm64 --self-contained -o "$STAGE_DIR"
-            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src"
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/osx"*
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/osx"*
             cp LICENSE README.md "$STAGE_DIR/" 2>/dev/null || true
             TAR_PATH="$OUTPUT_DIR/AgentsHub-v$VERSION-linux-arm64.tar.gz"
             tar -czf "$TAR_PATH" -C "$STAGE_DIR" .
@@ -79,7 +81,8 @@ for target in "${TARGETS[@]}"; do
             ;;
         osx-arm64)
             dotnet publish AgentsHub.csproj -f net10.0 -c Release -r osx-arm64 --self-contained -o "$STAGE_DIR"
-            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src"
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/linux"*
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/linux"*
             cp LICENSE README.md "$STAGE_DIR/" 2>/dev/null || true
             TAR_PATH="$OUTPUT_DIR/AgentsHub-v$VERSION-osx-arm64.tar.gz"
             tar -czf "$TAR_PATH" -C "$STAGE_DIR" .
@@ -87,7 +90,8 @@ for target in "${TARGETS[@]}"; do
             ;;
         osx-x64)
             dotnet publish AgentsHub.csproj -f net10.0 -c Release -r osx-x64 --self-contained -o "$STAGE_DIR"
-            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src"
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/linux"*
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/win"* "$STAGE_DIR/bin/linux"*
             cp LICENSE README.md "$STAGE_DIR/" 2>/dev/null || true
             TAR_PATH="$OUTPUT_DIR/AgentsHub-v$VERSION-osx-x64.tar.gz"
             tar -czf "$TAR_PATH" -C "$STAGE_DIR" .
@@ -95,7 +99,8 @@ for target in "${TARGETS[@]}"; do
             ;;
         win-x64)
             dotnet publish AgentsHub.csproj -f net10.0-windows -c Release -r win-x64 --self-contained -o "$STAGE_DIR"
-            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src"
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/linux"* "$STAGE_DIR/bin/osx"*
+            rm -rf "$STAGE_DIR/Profiles" "$STAGE_DIR/ui/node_modules" "$STAGE_DIR/ui/src" "$STAGE_DIR/bin/linux"* "$STAGE_DIR/bin/osx"*
             ZIP_PATH="$OUTPUT_DIR/AgentsHub-v$VERSION-win-x64.zip"
             (cd "$STAGE_DIR" && zip -r "$ZIP_PATH" .)
             echo "  ✔ Generated: $ZIP_PATH"
