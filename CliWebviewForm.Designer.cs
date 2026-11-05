@@ -7,7 +7,7 @@ partial class CliWebviewForm
     private System.ComponentModel.IContainer? components = null;
 
     private Panel topToolbar = null!;
-    private Panel tabsPanel = null!;
+    private HorizontalTabsPanel tabsPanel = null!;
 
     private Panel toolsPanel = null!;
     private Label activeStatusLabel = null!;
@@ -49,7 +49,7 @@ partial class CliWebviewForm
     private void InitializeComponent()
     {
         topToolbar = new Panel();
-        tabsPanel = new Panel();
+        tabsPanel = new HorizontalTabsPanel();
 
         toolsPanel = new Panel();
         activeStatusLabel = new Label();

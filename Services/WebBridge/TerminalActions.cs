@@ -456,7 +456,7 @@ public sealed partial class DashboardWebBridge : IDisposable
         {
             var workspaces = AiConfigService.Instance.GetCliWorkspaces();
             var firstEnabled = workspaces.FirstOrDefault(w => w.IsEnabled);
-            CliType initType = CliType.Hub;
+            CliType initType = CliType.ClaudeCode;
             if (firstEnabled != null)
             {
                 string norm = AiConfigService.NormalizeCliId(firstEnabled.Id);

@@ -126,7 +126,7 @@ public partial class CliWebviewForm : Form
         InitializeComponent();
     }
 
-    public CliWebviewForm(CliManagerService? cliManager, CliType initialTab = CliType.Hub, Form? mainForm = null) : this()
+    public CliWebviewForm(CliManagerService? cliManager, CliType initialTab = CliType.ClaudeCode, Form? mainForm = null) : this()
     {
         if (System.ComponentModel.LicenseManager.UsageMode != System.ComponentModel.LicenseUsageMode.Designtime && cliManager != null)
         {
@@ -164,9 +164,8 @@ public partial class CliWebviewForm : Form
 
     private static string CliTypeToId(CliType type) => type switch
     {
-        CliType.ClaudeCode => "claude_code",
         CliType.AntigravityCli => "antigravity_cli",
-        _ => "hub"
+        _ => "claude_code"
     };
 
     private static CliType IdToCliType(string id)
@@ -174,17 +173,15 @@ public partial class CliWebviewForm : Form
         string norm = AiConfigService.NormalizeCliId(id);
         return norm switch
         {
-            "claude_code" => CliType.ClaudeCode,
             "antigravity_cli" => CliType.AntigravityCli,
-            _ => CliType.Hub
+            _ => CliType.ClaudeCode
         };
     }
 
     private static bool IsBuiltInCli(string id)
     {
         string norm = AiConfigService.NormalizeCliId(id);
-        return string.Equals(norm, "hub", StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(norm, "claude_code", StringComparison.OrdinalIgnoreCase) ||
+        return string.Equals(norm, "claude_code", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(norm, "antigravity_cli", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1072,13 +1069,13 @@ public partial class CliWebviewForm : Form
         var c = ThemeManager.Colors;
         if (isMainVisible)
         {
-            _actionToolTip.SetToolTip(toggleMainWindowButton, "Hide Main Hub to Tray (Show only this Terminal window)\nRight-click for options");
+            _actionToolTip.SetToolTip(toggleMainWindowButton, "Hide Main Window to Tray (Show only this Terminal window)\nRight-click for options");
             toggleMainWindowButton.BackColor = c.ButtonBg;
             toggleMainWindowButton.FlatAppearance.BorderColor = c.ButtonBorder;
         }
         else
         {
-            _actionToolTip.SetToolTip(toggleMainWindowButton, "Main Hub is in Tray (Click to Restore Dashboard)\nRight-click for options");
+            _actionToolTip.SetToolTip(toggleMainWindowButton, "Main Window is in Tray (Click to Restore)\nRight-click for options");
             toggleMainWindowButton.BackColor = c.WellBackground;
             toggleMainWindowButton.FlatAppearance.BorderColor = c.AccentGreen;
         }
@@ -1103,7 +1100,7 @@ public partial class CliWebviewForm : Form
         bool isMainVisible = main != null && !main.IsDisposed && main.Visible && main.WindowState != FormWindowState.Minimized;
 
         var toggleItem = new ToolStripMenuItem(
-            isMainVisible ? "Hide Main Hub to Tray" : "Show Main Hub Window",
+            isMainVisible ? "Hide Main Window to Tray" : "Show Main Window",
             null,
             (_, _) => ToggleMainWindowVisibility()
         )
@@ -1114,7 +1111,7 @@ public partial class CliWebviewForm : Form
 
         bool autoHide = StartupHelper.GetPreference("HideMainOnCliOpen", false);
         var autoHideItem = new ToolStripMenuItem(
-            "Auto-hide Main Hub when Opening Terminal",
+            "Auto-hide Main Window when Opening Terminal",
             null,
             (_, _) =>
             {
@@ -1612,6 +1609,11 @@ public partial class CliWebviewForm : Form
 
     public void RebuildTabs()
     {
+        tabsPanel.AutoScrollPosition = Point.Empty;
+        tabsPanel.AutoScroll = false;
+        tabsPanel.AutoScrollMinSize = Size.Empty;
+        tabsPanel.HorizontalScroll.Visible = false;
+        tabsPanel.VerticalScroll.Visible = false;
         tabsPanel.SuspendLayout();
         tabsPanel.Controls.Clear();
         _dynamicTabButtons.Clear();
@@ -1675,9 +1677,9 @@ public partial class CliWebviewForm : Form
 
         _manageClisButton = new Button
         {
-            Size = new Size(32, 34),
-            MinimumSize = new Size(32, 34),
-            MaximumSize = new Size(32, 34),
+            Size = new Size(32, 32),
+            MinimumSize = new Size(32, 32),
+            MaximumSize = new Size(32, 32),
             Location = new Point(curX, 6),
             FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand,
@@ -1695,8 +1697,28 @@ public partial class CliWebviewForm : Form
         tabsPanel.Controls.Add(_manageClisButton);
 
         tabsPanel.Tag = curX;
-        tabsPanel.AutoScroll = true;
-        tabsPanel.Width = curX;
+        int maxAllowedTabsWidth = Math.Max(120, topToolbar.ClientSize.Width - 250);
+        if (curX <= maxAllowedTabsWidth)
+        {
+            tabsPanel.AutoScroll = false;
+            tabsPanel.AutoScrollPosition = Point.Empty;
+            tabsPanel.AutoScrollMinSize = Size.Empty;
+            tabsPanel.HorizontalScroll.Visible = false;
+            tabsPanel.HorizontalScroll.Enabled = false;
+            tabsPanel.VerticalScroll.Visible = false;
+            tabsPanel.VerticalScroll.Enabled = false;
+            tabsPanel.Width = curX;
+        }
+        else
+        {
+            tabsPanel.Width = maxAllowedTabsWidth;
+            tabsPanel.AutoScroll = true;
+            tabsPanel.AutoScrollMinSize = new Size(curX, 0);
+            tabsPanel.HorizontalScroll.Enabled = true;
+            tabsPanel.HorizontalScroll.Visible = true;
+            tabsPanel.VerticalScroll.Enabled = false;
+            tabsPanel.VerticalScroll.Visible = false;
+        }
         tabsPanel.ResumeLayout();
 
         bool activeTabChanged = false;
@@ -1737,7 +1759,7 @@ public partial class CliWebviewForm : Form
         var btn = new Button
         {
             Tag = tabId,
-            Height = 34,
+            Height = 32,
             FlatStyle = FlatStyle.Flat,
             Font = new Font("Segoe UI", 8.75F, FontStyle.Bold),
             Cursor = Cursors.Hand,
@@ -1757,7 +1779,7 @@ public partial class CliWebviewForm : Form
             targetWidth = Math.Clamp(measuredWidth, 75, 130);
         }
 
-        btn.Size = new Size(targetWidth, 34);
+        btn.Size = new Size(targetWidth, 32);
         btn.Location = new Point(curX, 6);
         curX += targetWidth + 4;
 
@@ -2467,11 +2489,31 @@ public partial class CliWebviewForm : Form
                 if (_profileComboBox != null) actionControlsWidth += 120 + 6;
             }
 
-            // 2. Clamp tabsPanel.Width
+            // 2. Clamp tabsPanel.Width & toggle AutoScroll
             int preferredTabsWidth = tabsPanel.Tag is int w ? w : tabsPanel.Width;
             int maxAllowedTabsWidth = Math.Max(120, topToolbar.ClientSize.Width - actionControlsWidth - 40);
-            tabsPanel.Width = Math.Min(preferredTabsWidth, maxAllowedTabsWidth);
-            tabsPanel.AutoScroll = true;
+
+            if (preferredTabsWidth <= maxAllowedTabsWidth)
+            {
+                tabsPanel.AutoScroll = false;
+                tabsPanel.AutoScrollPosition = Point.Empty;
+                tabsPanel.AutoScrollMinSize = Size.Empty;
+                tabsPanel.HorizontalScroll.Visible = false;
+                tabsPanel.HorizontalScroll.Enabled = false;
+                tabsPanel.VerticalScroll.Visible = false;
+                tabsPanel.VerticalScroll.Enabled = false;
+                tabsPanel.Width = preferredTabsWidth;
+            }
+            else
+            {
+                tabsPanel.Width = maxAllowedTabsWidth;
+                tabsPanel.AutoScroll = true;
+                tabsPanel.AutoScrollMinSize = new Size(preferredTabsWidth, 0);
+                tabsPanel.HorizontalScroll.Enabled = true;
+                tabsPanel.HorizontalScroll.Visible = true;
+                tabsPanel.VerticalScroll.Enabled = false;
+                tabsPanel.VerticalScroll.Visible = false;
+            }
 
             // 3. Responsive Claude Dropdowns & Controls Layout in toolsPanel
             int right = toolsPanel.ClientSize.Width - 10;
@@ -3288,7 +3330,6 @@ public partial class CliWebviewForm : Form
             claudeWebView = CreateHostedWebView();
             antigravityWebView = CreateHostedWebView();
 
-            paneHostLeft.Controls.Add(hubWebView);
             paneHostLeft.Controls.Add(claudeWebView);
             paneHostLeft.Controls.Add(antigravityWebView);
 
@@ -4389,4 +4430,57 @@ public partial class CliWebviewForm : Form
         public int? Port { get; set; }
         public override string ToString() => DisplayText;
     }
+
+    /// <summary>
+    /// Custom panel that completely suppresses vertical scrolling, prevents child controls
+    /// from shifting vertically out of view, and translates mouse wheel to horizontal scrolling.
+    /// </summary>
+    private sealed class HorizontalTabsPanel : Panel
+    {
+        public HorizontalTabsPanel()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.Style &= ~0x00200000; // WS_VSCROLL: strip vertical scrollbar
+                return cp;
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_VSCROLL = 0x0115;
+            const int WM_MOUSEWHEEL = 0x020A;
+
+            if (m.Msg == WM_VSCROLL) return; // Block vertical scroll
+
+            if (m.Msg == WM_MOUSEWHEEL)
+            {
+                if (AutoScroll && HorizontalScroll.Visible)
+                {
+                    int delta = unchecked((short)((long)m.WParam >> 16));
+                    int current = -AutoScrollPosition.X;
+                    int step = delta > 0 ? -60 : 60;
+                    int maxScroll = Math.Max(0, DisplayRectangle.Width - ClientSize.Width);
+                    AutoScrollPosition = new Point(Math.Clamp(current + step, 0, maxScroll), 0);
+                }
+                return; // Intercept mousewheel so base never scrolls vertically
+            }
+
+            base.WndProc(ref m);
+        }
+
+        protected override Point ScrollToControl(Control activeControl)
+        {
+            var pt = base.ScrollToControl(activeControl);
+            return new Point(pt.X, 0); // Never scroll Y
+        }
+    }
+
 }

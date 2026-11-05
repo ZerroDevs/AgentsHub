@@ -199,7 +199,7 @@ public class ProjectWorkspace
     public string AntigravityProfile { get; set; } = "";
 
     [JsonPropertyName("primaryCli")]
-    public string PrimaryCli { get; set; } = "Hub";
+    public string PrimaryCli { get; set; } = "ClaudeCode";
 
     [JsonPropertyName("secondaryCli")]
     public string SecondaryCli { get; set; } = "powershell";
@@ -988,7 +988,7 @@ public class AiConfigService
             }
         }
 
-        EnsureDefaultCli("hub", "Hub", "hub dashboard", 9119, true);
+        _config.CliWorkspaces.RemoveAll(w => string.Equals(w.Id, "hub", StringComparison.OrdinalIgnoreCase));
         EnsureDefaultCli("claude_code", "Claude Code", "claude", 9229, false);
         EnsureDefaultCli("antigravity_cli", "Antigravity CLI", "agy", 9339, false);
 
@@ -1142,7 +1142,7 @@ public class AiConfigService
 
     public static string NormalizeCliId(string? id)
     {
-        if (string.IsNullOrWhiteSpace(id)) return "hub";
+        if (string.IsNullOrWhiteSpace(id)) return "claude_code";
         id = id.Trim();
         if (id.StartsWith("antigravity_cli:", StringComparison.OrdinalIgnoreCase))
         {
@@ -1151,7 +1151,7 @@ public class AiConfigService
         var clean = id.ToLowerInvariant().Replace("_", "").Replace("-", "");
         return clean switch
         {
-            "hub" => "hub",
+            "hub" => "claude_code",
             "claude" or "claudecode" => "claude_code",
             "antigravity" or "antigravitycli" => "antigravity_cli",
             _ => id
@@ -1162,7 +1162,8 @@ public class AiConfigService
     {
         lock (_lock)
         {
-            return [.. _config.CliWorkspaces];
+            _config.CliWorkspaces?.RemoveAll(w => string.Equals(w.Id, "hub", StringComparison.OrdinalIgnoreCase));
+            return [.. _config.CliWorkspaces ?? []];
         }
     }
 
@@ -1302,14 +1303,12 @@ public class AiConfigService
     {
         var preset = NormalizeWorkspacePreset(presetName);
 
-        var (hub, claude, antigravity) = preset switch
+        var (claude, antigravity) = preset switch
         {
-            "Preset_Clean" => (false, false, false),
-            "Preset_All" => (true, true, true),
-            _ => (false, true, true)
+            "Preset_Clean" => (false, false),
+            _ => (true, true)
         };
 
-        SetWorkspaceEnabled("hub", hub);
         SetWorkspaceEnabled("claude_code", claude);
         SetWorkspaceEnabled("antigravity_cli", antigravity);
 
@@ -1338,13 +1337,11 @@ public class AiConfigService
     /// </summary>
     private string MatchPresetToFlags()
     {
-        bool hub = IsWorkspaceEnabled("hub");
         bool claude = IsWorkspaceEnabled("claude_code");
         bool antigravity = IsWorkspaceEnabled("antigravity_cli");
 
-        if (!hub && !claude && !antigravity) return "Preset_Clean";
-        if (hub && claude && antigravity) return "Preset_All";
-        if (!hub && claude && antigravity) return "Preset_Duo";
+        if (!claude && !antigravity) return "Preset_Clean";
+        if (claude && antigravity) return "Preset_Duo";
 
         return string.Empty;
     }
@@ -1812,7 +1809,7 @@ public class AiConfigService
                     Name = "Default Workspace",
                     WorkingDirectory = Environment.CurrentDirectory,
                     AntigravityProfile = "",
-                    PrimaryCli = "Hub",
+                    PrimaryCli = "ClaudeCode",
                     SecondaryCli = "powershell",
                     SplitMode = "horizontal",
                     SplitRatio = 0.5,

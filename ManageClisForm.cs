@@ -317,7 +317,7 @@ public class ManageClisForm : Form
         var lblPort = new Label { Text = "Browser Port (optional, if web UI):", Location = new Point(24, 188), AutoSize = true, ForeColor = c.TextPrimary };
         var txtPort = new TextBox { Location = new Point(24, 210), Size = new Size(140, 24), BackColor = c.WellBackground, ForeColor = c.TextPrimary, Text = existing?.Port?.ToString() ?? "" };
 
-        var chkWeb = new CheckBox { Text = "Launch as Web Interface (like Hub)", Location = new Point(180, 212), AutoSize = true, Checked = existing?.IsWebUi ?? false, ForeColor = c.TextPrimary };
+        var chkWeb = new CheckBox { Text = "Launch as Web Interface (HTTP/Localhost)", Location = new Point(180, 212), AutoSize = true, Checked = existing?.IsWebUi ?? false, ForeColor = c.TextPrimary };
 
         var btnSave = new Button { Text = "Save Workspace", Location = new Point(220, 265), Size = new Size(130, 32), FlatStyle = FlatStyle.Flat, BackColor = c.AccentGreen, ForeColor = c.AccentGreenText, DialogResult = DialogResult.OK, Cursor = Cursors.Hand };
         btnSave.FlatAppearance.BorderSize = 0;
