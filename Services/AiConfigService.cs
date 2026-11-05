@@ -988,7 +988,13 @@ public class AiConfigService
             }
         }
 
-        _config.CliWorkspaces.RemoveAll(w => string.Equals(w.Id, "hub", StringComparison.OrdinalIgnoreCase));
+        _config.CliWorkspaces.RemoveAll(w =>
+            string.Equals(w.Id, "hub", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(w.Id, "hermes", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(w.Name, "hermes", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(w.Name, "hub", StringComparison.OrdinalIgnoreCase) ||
+            (w.Command != null && (w.Command.Contains("hermes", StringComparison.OrdinalIgnoreCase) || w.Command.Contains("hub dashboard", StringComparison.OrdinalIgnoreCase)))
+        );
         EnsureDefaultCli("claude_code", "Claude Code", "claude", 9229, false);
         EnsureDefaultCli("antigravity_cli", "Antigravity CLI", "agy", 9339, false);
 
@@ -1151,7 +1157,7 @@ public class AiConfigService
         var clean = id.ToLowerInvariant().Replace("_", "").Replace("-", "");
         return clean switch
         {
-            "hub" => "claude_code",
+            "hub" or "hermes" => "claude_code",
             "claude" or "claudecode" => "claude_code",
             "antigravity" or "antigravitycli" => "antigravity_cli",
             _ => id
@@ -1162,7 +1168,13 @@ public class AiConfigService
     {
         lock (_lock)
         {
-            _config.CliWorkspaces?.RemoveAll(w => string.Equals(w.Id, "hub", StringComparison.OrdinalIgnoreCase));
+            _config.CliWorkspaces?.RemoveAll(w =>
+                string.Equals(w.Id, "hub", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(w.Id, "hermes", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(w.Name, "hermes", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(w.Name, "hub", StringComparison.OrdinalIgnoreCase) ||
+                (w.Command != null && (w.Command.Contains("hermes", StringComparison.OrdinalIgnoreCase) || w.Command.Contains("hub dashboard", StringComparison.OrdinalIgnoreCase)))
+            );
             return [.. _config.CliWorkspaces ?? []];
         }
     }
@@ -1821,13 +1833,25 @@ public class AiConfigService
             }
             else
             {
-                // Sanitize any existing workspaces pointing to "default"
+                // Sanitize any existing workspaces pointing to "default" or using legacy hermes/hub
                 bool dirty = false;
                 foreach (var ws in _config.Workspaces)
                 {
                     if (string.Equals(ws.AntigravityProfile, "default", StringComparison.OrdinalIgnoreCase))
                     {
                         ws.AntigravityProfile = "";
+                        dirty = true;
+                    }
+                    if (string.Equals(ws.PrimaryCli, "hermes", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ws.PrimaryCli, "hub", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ws.PrimaryCli = "ClaudeCode";
+                        dirty = true;
+                    }
+                    if (string.Equals(ws.SecondaryCli, "hermes", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(ws.SecondaryCli, "hub", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ws.SecondaryCli = "powershell";
                         dirty = true;
                     }
                 }
