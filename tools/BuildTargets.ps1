@@ -40,6 +40,17 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
     & node (Join-Path $rootDir "tools/sync-version.mjs")
 }
 
+# Ensure UI dist bundle is built
+$uiDir = Join-Path $rootDir "ui"
+if (Test-Path $uiDir) {
+    Write-Host "[*] Ensuring UI dist bundle is built..." -ForegroundColor Gray
+    if (Get-Command npm.cmd -ErrorAction SilentlyContinue) {
+        & npm.cmd --prefix $uiDir run build
+    } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+        & npm --prefix $uiDir run build
+    }
+}
+
 if (-not $OutputDir) {
     $OutputDir = Join-Path $rootDir "dist"
 }
@@ -47,14 +58,20 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }
 
-# Resolve version
+# Resolve version: VERSION file at repo root is the single source of truth
 if (-not $Version) {
-    $csprojPath = Join-Path $rootDir "AgentsHub.csproj"
-    if (Test-Path $csprojPath) {
-        $xml = [xml](Get-Content $csprojPath)
-        $node = $xml.SelectSingleNode("//Version")
-        if ($node) {
-            $Version = $node.InnerText.Trim()
+    $versionFile = Join-Path $rootDir "VERSION"
+    if (Test-Path $versionFile) {
+        $Version = (Get-Content $versionFile -Raw).Trim().TrimStart("vV")
+    }
+    if (-not $Version) {
+        $csprojPath = Join-Path $rootDir "AgentsHub.csproj"
+        if (Test-Path $csprojPath) {
+            $xml = [xml](Get-Content $csprojPath)
+            $node = $xml.SelectSingleNode("//Version")
+            if ($node -and -not $node.InnerText.Contains('$')) {
+                $Version = $node.InnerText.Trim()
+            }
         }
     }
     if (-not $Version) { $Version = "1.0.5" }
@@ -96,10 +113,14 @@ foreach ($target in $Targets) {
             # Per-profile OAuth tokens belong to the machine that ran the app. A publish folder
             # that was used as a run directory can carry them, so they never enter a package.
             Remove-Item (Join-Path $publishDir "Profiles") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $publishDir "ui\node_modules") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $publishDir "ui\src") -Recurse -Force -ErrorAction SilentlyContinue
 
             # Copy to staging for zip packaging
             Copy-Item "$publishDir\*" $stagingDir -Recurse -Force
             Remove-Item (Join-Path $stagingDir "Profiles") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $stagingDir "ui\node_modules") -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $stagingDir "ui\src") -Recurse -Force -ErrorAction SilentlyContinue
 
             # 2. Package Portable Zip
             $zipPath = Join-Path $OutputDir "AgentsHub-v$Version-win-x64.zip"

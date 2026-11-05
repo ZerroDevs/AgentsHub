@@ -71,6 +71,15 @@
   <!-- Per-profile OAuth tokens are user data and must never be swept into a build output. -->
   <ItemGroup>
     <Content Remove="Profiles\**" />
+    <Content Remove="node_modules\**" />
+    <None Remove="node_modules\**" />
+    <EmbeddedResource Remove="node_modules\**" />
+    <Content Remove="ui\node_modules\**" />
+    <None Remove="ui\node_modules\**" />
+    <EmbeddedResource Remove="ui\node_modules\**" />
+    <Content Remove="ui\src\**" />
+    <None Remove="ui\src\**" />
+    <EmbeddedResource Remove="ui\src\**" />
     <None Remove="Profiles\**" />
     <EmbeddedResource Remove="Profiles\**" />
   </ItemGroup>
@@ -169,11 +178,8 @@
     is built for real; on a machine without it the script's own error is shown and the build goes
     on, since none of those files affect the binary.
   -->
-  <Target Name="SyncVersionFiles" BeforeTargets="BeforeBuild"
-          Condition="Exists('$(MSBuildProjectDirectory)/tools/sync-version.mjs') and '$(DesignTimeBuild)' != 'true'">
-    <Exec Command="node &quot;$(MSBuildProjectDirectory)/tools/sync-version.mjs&quot;"
-          IgnoreExitCode="true"
-          StandardOutputImportance="normal" />
+  <Target Name="SyncVersionFiles" BeforeTargets="BeforeBuild" Condition="Exists('$(MSBuildProjectDirectory)/tools/sync-version.mjs') and '$(DesignTimeBuild)' != 'true'">
+    <Exec Command="node &quot;$(MSBuildProjectDirectory)/tools/sync-version.mjs&quot;" IgnoreExitCode="true" StandardOutputImportance="normal" />
   </Target>
 
   <!-- Terminate any running instance before build to prevent MSB3021 file lock -->

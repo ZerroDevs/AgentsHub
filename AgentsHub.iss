@@ -59,16 +59,16 @@ Name: "startupicon"; Description: "Launch Agents Hub minimized to system tray on
 
 [Files]
 ; الملف التنفيذي وكافة مخرجات الـ publish (DLLs وأي ملفات runtime مصاحبة)
-Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "Profiles\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "Profiles\*,ui\node_modules\*,*\ui\node_modules\*,ui\src\*,*\ui\src\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; ملفات الواجهة الأمامية لمجلد UI بالكامل (HTML / CSS / JS / xterm)
-Source: "ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "ui\*"; DestDir: "{app}\ui"; Excludes: "node_modules\*,*\node_modules\*,node_modules,*\node_modules,src\*,*\src\*,src,*\src,*.ts,*.json,*.mjs,*.lock,postcss.config.js,tailwind.config.js"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; مجلد الأصول الثابتة
 Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; سكريبتات وأدوات التشغيل
-Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 ; ملفات الرخص والتوثيق
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
