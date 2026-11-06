@@ -43,7 +43,7 @@ interface BlockPart {
 
 function splitMarkdownBlocks(content: string): BlockPart[] {
   const parts: BlockPart[] = [];
-  const regex = /```([a-zA-Z0-9_\-\+]*)\n([\s\S]*?)```/g;
+  const regex = /```([a-zA-Z0-9_\-\+]*)[ \t]*\r?\n([\s\S]*?)```/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -54,6 +54,29 @@ function splitMarkdownBlocks(content: string): BlockPart[] {
 
     parts.push({ type: 'code', lang: match[1]?.trim() || 'code', code: match[2] });
     lastIndex = regex.lastIndex;
+  }
+
+  // A fence the reply never closed (still streaming, or truncated): keep the raw ``` out of the
+  // prose and render the remainder as code. A ```span``` that closes on its own line is inline
+  // code, not a fence, so it stays in prose for renderInlineTokens.
+  const openFence = content.indexOf('```', lastIndex);
+  if (openFence >= 0) {
+    const rest = content.substring(openFence + 3);
+    const lineBreak = rest.match(/\r?\n/);
+    const firstLine = lineBreak?.index !== undefined ? rest.substring(0, lineBreak.index) : rest;
+
+    if (!firstLine.includes('```')) {
+      if (openFence > lastIndex) {
+        parts.push({ type: 'prose', text: content.substring(lastIndex, openFence) });
+      }
+      if (lineBreak?.index !== undefined) {
+        const lang = rest.substring(0, lineBreak.index).trim();
+        parts.push({ type: 'code', lang: lang || 'code', code: rest.substring(lineBreak.index + lineBreak[0].length) });
+      } else {
+        parts.push({ type: 'code', lang: 'code', code: rest });
+      }
+      return parts;
+    }
   }
 
   if (lastIndex < content.length) {
@@ -309,7 +332,9 @@ function safeHref(raw: string): string | null {
 
 function renderInlineTokens(line: string): React.ReactNode[] {
   const tokens: React.ReactNode[] = [];
-  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
+  // Multi-backtick delimiters (`+ … `+) cover ``x`` and ```x```, which models emit when the text
+  // itself quotes single backticks. Single `x` is the common case.
+  const regex = /(`+[^`]+`+|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
   let lastIdx = 0;
   let match: RegExpExecArray | null;
 
@@ -320,12 +345,18 @@ function renderInlineTokens(line: string): React.ReactNode[] {
 
     const token = match[0];
     if (token.startsWith('`') && token.endsWith('`')) {
+      const content = token.replace(/^`+/, '').replace(/`+$/, '');
+      // CommonMark strips one flanking space on each side: ` x ` renders as x, not as padded chip.
+      const trimmed =
+        content.startsWith(' ') && content.endsWith(' ') && content.trim().length > 0
+          ? content.slice(1, -1)
+          : content;
       tokens.push(
         <code
           key={match.index}
           className="mx-0.5 rounded bg-surface-strong px-1.5 py-0.5 font-mono text-[11.5px] text-accent"
         >
-          {token.slice(1, -1)}
+          {trimmed}
         </code>
       );
     } else if (token.startsWith('**') && token.endsWith('**')) {
