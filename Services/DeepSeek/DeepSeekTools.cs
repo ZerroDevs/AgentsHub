@@ -263,7 +263,16 @@ internal static class DeepSeekTools
         foreach (var match in ToolBlock.Matches(answer).Cast<Match>().Concat(AnyBlock.Matches(answer).Cast<Match>()))
         {
             fenced.Add((match.Index, match.Index + match.Length));
-            TryAdd(match.Groups[1].Value);
+            string body = match.Groups[1].Value;
+            if (TryAdd(body)) continue;
+
+            // One fence can hold several objects, one per line, despite the one-per-block rule.
+            // Parsing the body as a single object failed, so read each balanced object out of it.
+            foreach (Match start in BareAction.Matches(body))
+            {
+                string? inner = BalancedObject(body, start.Index);
+                if (inner != null) TryAdd(inner);
+            }
         }
 
         // A small model often skips the fence and prints the object on its own. Reading that is the
@@ -352,7 +361,13 @@ internal static class DeepSeekTools
 
         foreach (var match in ToolBlock.Matches(answer).Cast<Match>().Concat(AnyBlock.Matches(answer).Cast<Match>()))
         {
-            Collect(match.Groups[1].Value);
+            string body = match.Groups[1].Value;
+            Collect(body);
+            foreach (Match start in BareAction.Matches(body))
+            {
+                string? inner = BalancedObject(body, start.Index);
+                if (inner != null) Collect(inner);
+            }
         }
 
         foreach (Match start in BareAction.Matches(answer))
@@ -470,6 +485,20 @@ internal static class DeepSeekTools
         int tag = ToolTagLength(text);
         if (tag > 0) text = text[tag..].TrimStart();
 
+        if (ParsesAsActionObject(text)) return true;
+
+        // Several objects in one fence: the whole body cannot parse, so read them one at a time.
+        foreach (Match start in BareAction.Matches(text))
+        {
+            string? inner = BalancedObject(text, start.Index);
+            if (inner != null && ParsesAsActionObject(inner)) return true;
+        }
+
+        return false;
+    }
+
+    private static bool ParsesAsActionObject(string text)
+    {
         try
         {
             using var doc = JsonDocument.Parse(text);
