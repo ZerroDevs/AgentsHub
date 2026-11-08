@@ -8,6 +8,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun run sidecar/engine.ts --port=0 --token=dev-secret",
+    "desktop": "electron electron/main.cjs",
     "prebuild": "node tools/sync-version.mjs",
     "build": "bun run build.ts",
     "sync-version": "node tools/sync-version.mjs",
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.5",
+    "electron": "^45.2.3",
     "typescript": "^5.7.0"
   }
 }

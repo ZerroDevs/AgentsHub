@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace AgentsHub;
 
 internal static partial class Program
@@ -67,23 +69,58 @@ internal static partial class Program
         var openCode = new Services.OpenCodeWatcherService();
         using var bridge = new Services.DashboardWebBridge(null, cliManager, lanProxy, openCode);
 
-        int port = lanProxy.ListenPort > 0 ? lanProxy.ListenPort : 9119;
-        Console.WriteLine($"[AgentsHub] Web Dashboard available at: http://localhost:{port}");
+        // Start Bun Sidecar Engine in background
+        _ = Services.Sidecar.SidecarHostService.Instance.StartAsync();
+
+        // Start Linux HTTP + WebSocket bridge server for React SPA and Electron desktop
+        using var desktopServer = new Services.Platform.LinuxDesktopServer(bridge, 9125);
+        desktopServer.Start();
+        Console.WriteLine($"[AgentsHub] Desktop Server listening at: http://127.0.0.1:{desktopServer.Port}");
+
+        int lanPort = lanProxy.ListenPort > 0 ? lanProxy.ListenPort : 9191;
         lanProxy.Start();
 
-        bool noBrowser = args.Any(a => a.Equals("--no-browser", StringComparison.OrdinalIgnoreCase) || a.Equals("-n", StringComparison.OrdinalIgnoreCase));
-        if (!noBrowser)
+        bool headless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase) ||
+                                      a.Equals("-s", StringComparison.OrdinalIgnoreCase) ||
+                                      a.Equals("--server", StringComparison.OrdinalIgnoreCase));
+        bool noDesktop = headless || args.Any(a => a.Equals("--no-desktop", StringComparison.OrdinalIgnoreCase));
+
+        using var exitEvent = new ManualResetEventSlim(false);
+        Process? electronProcess = null;
+
+        if (!noDesktop)
         {
-            Console.WriteLine("[AgentsHub] Launching dashboard in default browser...");
-            Services.Platform.PlatformHelper.OpenUrlInBrowser($"http://localhost:{port}");
+            electronProcess = LaunchElectronDesktop();
+            if (electronProcess != null)
+            {
+                Console.WriteLine("[AgentsHub] Launched native desktop window.");
+                electronProcess.EnableRaisingEvents = true;
+                electronProcess.Exited += (_, _) => exitEvent.Set();
+            }
+            else
+            {
+                Console.WriteLine($"[AgentsHub] Launching dashboard in browser: http://127.0.0.1:{desktopServer.Port}");
+                Services.Platform.PlatformHelper.OpenUrlInBrowser($"http://127.0.0.1:{desktopServer.Port}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"[AgentsHub] Running in server/headless mode. Dashboard at: http://127.0.0.1:{desktopServer.Port}");
         }
 
-        Console.WriteLine("[AgentsHub] Agents Hub is running. Press Ctrl+C to terminate.");
-        using var exitEvent = new ManualResetEventSlim(false);
+        Console.WriteLine("[AgentsHub] Agents Hub is running. Press Ctrl+C or close the window to terminate.");
         Console.CancelKeyPress += (s, e) =>
         {
             e.Cancel = true;
             Console.WriteLine("\r\n[AgentsHub] Shutting down services...");
+            try
+            {
+                if (electronProcess != null && !electronProcess.HasExited)
+                {
+                    electronProcess.Kill(entireProcessTree: true);
+                }
+            }
+            catch { }
             exitEvent.Set();
         };
 
@@ -91,6 +128,49 @@ internal static partial class Program
         lanProxy.Dispose();
         cliManager.Dispose();
         Console.WriteLine("[AgentsHub] Stopped cleanly.");
+    }
+
+    private static Process? LaunchElectronDesktop()
+    {
+        try
+        {
+            string cwd = Directory.GetCurrentDirectory();
+            string electronBin = Path.Combine(cwd, "node_modules", ".bin", "electron");
+            bool hasLocalElectron = File.Exists(electronBin);
+
+            string mainScript = Path.Combine(cwd, "electron", "main.cjs");
+            if (!File.Exists(mainScript))
+            {
+                mainScript = Path.Combine(AppContext.BaseDirectory, "electron", "main.cjs");
+            }
+            if (!File.Exists(mainScript)) return null;
+
+            string electronArgs = hasLocalElectron
+                ? $"\"{mainScript}\" --no-sandbox"
+                : $"electron \"{mainScript}\" --no-sandbox";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = hasLocalElectron ? electronBin : "npx",
+                Arguments = electronArgs,
+                WorkingDirectory = cwd,
+                UseShellExecute = false,
+            };
+            psi.Environment["AGENTSHUB_URL"] = "http://127.0.0.1:9125/index.html";
+
+            string? display = Environment.GetEnvironmentVariable("DISPLAY");
+            if (!string.IsNullOrEmpty(display))
+            {
+                psi.Environment["DISPLAY"] = display;
+            }
+
+            return Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AgentsHub] Could not launch Electron desktop: {ex.Message}");
+            return null;
+        }
     }
 #endif
 

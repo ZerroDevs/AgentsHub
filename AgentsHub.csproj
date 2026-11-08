@@ -34,6 +34,8 @@
     <FileVersion>$(AppVersion).0</FileVersion>
     <Version>$(AppVersion)</Version>
     <NoWarn>$(NoWarn);MSB3277;CA1416</NoWarn>
+    <!-- Allows Linux/macOS to restore multi-target projects containing net10.0-windows -->
+    <EnableWindowsTargeting Condition="'$(OS)' != 'Windows_NT'">true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <!-- Platform specific targets -->
